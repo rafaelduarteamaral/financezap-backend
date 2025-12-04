@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinanceZap - Controle Financeiro</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .header h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 2em;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .nav a {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            transition: background 0.3s;
+        }
+
+        .nav a:hover {
+            background: #5568d3;
+        }
+
+        .nav a.active {
+            background: #764ba2;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-card .number {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .filters {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .filters input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1em;
+            margin-bottom: 10px;
+        }
+
+        .transacoes-container {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .transacao {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .transacao-info {
+            flex: 1;
+        }
+
+        .transacao-descricao {
+            font-weight: 600;
+            color: #333;
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+
+        .transacao-detalhes {
+            color: #6b7280;
+            font-size: 0.9em;
+        }
+
+        .transacao-valor {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6b7280;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #667ee0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>💰 FinanceZap - Controle Financeiro</h1>
+            <div class="nav">
+                <a href="/app">Mensagens</a>
+                <a href="/financeiro.html" class="active">Transações</a>
+            </div>
+            
+            <div class="stats" id="stats">
+                <div class="stat-card">
+                    <div class="number" id="totalTransacoes">0</div>
+                    <div class="label">Total de Transações</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="totalGasto">R$ 0,00</div>
+                    <div class="label">Total Gasto</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="totalHoje">R$ 0,00</div>
+                    <div class="label">Gasto Hoje</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <input 
+                type="text" 
+                id="filtroTelefone" 
+                placeholder="Filtrar por telefone (ex: +556181474690) ou deixe vazio para ver todas"
+                onkeyup="filtrarTransacoes()"
+            >
+        </div>
+
+        <div class="transacoes-container">
+            <h2>💳 Transações Financeiras</h2>
+            <div id="transacoesList">
+                <div class="loading">Carregando transações...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let todasTransacoes = [];
+        let telefoneFiltro = '';
+
+        async function carregarTransacoes() {
+            try {
+                const telefone = document.getElementById('filtroTelefone').value.trim();
+                
+                let url = '/api/transacoes';
+                if (telefone) {
+                    url = `/api/transacoes/${encodeURIComponent(telefone)}`;
+                }
+                
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                if (data.success) {
+                    todasTransacoes = data.transacoes || [];
+                    telefoneFiltro = telefone;
+                    renderizarTransacoes();
+                    atualizarEstatisticas(data);
+                }
+            } catch (error) {
+                console.error('Erro ao carregar transações:', error);
+                document.getElementById('transacoesList').innerHTML = 
+                    '<div class="empty-state"><h3>Erro ao carregar transações</h3></div>';
+            }
+        }
+
+        function filtrarTransacoes() {
+            carregarTransacoes();
+        }
+
+        function atualizarEstatisticas(data) {
+            const totalTransacoes = data.total || todasTransacoes.length;
+            const totalGasto = data.totalGasto || todasTransacoes.reduce((sum, t) => sum + t.valor, 0);
+            
+            // Calcula gasto de hoje
+            const hoje = new Date();
+            hoje.setHours(0, 0, 0, 0);
+            const transacoesHoje = todasTransacoes.filter(t => {
+                const dataTransacao = new Date(t.dataHora);
+                return dataTransacao >= hoje;
+            });
+            const totalHoje = transacoesHoje.reduce((sum, t) => sum + t.valor, 0);
+            
+            document.getElementById('totalTransacoes').textContent = totalTransacoes;
+            document.getElementById('totalGasto').textContent = formatarMoeda(totalGasto);
+            document.getElementById('totalHoje').textContent = formatarMoeda(totalHoje);
+        }
+
+        function formatarMoeda(valor) {
+            return new Intl.NumberFormat('pt-BR', {
+                style: 'currency',
+                currency: 'BRL'
+            }).format(valor);
+        }
+
+        function formatarNumero(numero) {
+            if (numero.startsWith('+55')) {
+                const ddd = numero.substring(3, 5);
+                const parte1 = numero.substring(5, 10);
+                const parte2 = numero.substring(10);
+                return `(${ddd}) ${parte1}-${parte2}`;
+            }
+            return numero;
+        }
+
+        function renderizarTransacoes() {
+            const container = document.getElementById('transacoesList');
+            
+            if (todasTransacoes.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <h3>Nenhuma transação encontrada</h3>
+                        <p>Envie uma mensagem como: "comprei um sanduiche por 50 reais"</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = todasTransacoes.map(transacao => `
+                <div class="transacao">
+                    <div class="transacao-info">
+                        <div class="transacao-descricao">${escapeHtml(transacao.descricao)}</div>
+                        <div class="transacao-detalhes">
+                            📞 ${formatarNumero(transacao.telefone)} • 
+                            📅 ${transacao.dataHora}
+                        </div>
+                    </div>
+                    <div class="transacao-valor">${formatarMoeda(transacao.valor)}</div>
+                </div>
+            `).join('');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Carrega transações ao iniciar
+        window.addEventListener('load', () => {
+            carregarTransacoes();
+            // Atualiza a cada 5 segundos
+            setInterval(carregarTransacoes, 5000);
+        });
+    </script>
+</body>
+</html>
+

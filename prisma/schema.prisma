@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:../database.sqlite"
+}
+
+model Transacao {
+  id               Int      @id @default(autoincrement())
+  telefone         String
+  descricao        String
+  valor            Float
+  categoria        String   @default("outros")
+  tipo             String   @default("saida") // "entrada" ou "saida"
+  metodo           String   @default("debito") // "credito" ou "debito"
+  dataHora         String
+  data             String
+  mensagemOriginal String?
+  criadoEm         DateTime @default(now())
+
+  @@index([telefone])
+  @@index([data])
+  @@index([categoria])
+  @@index([tipo])
+  @@index([metodo])
+  @@map("transacoes")
+}
+
+model NumeroRegistrado {
+  id                      Int       @id @default(autoincrement())
+  telefone                String    @unique
+  primeiraMensagemEnviada DateTime  @default(now())
+  ultimaMensagemEnviada   DateTime?
+  totalMensagensEnviadas  Int       @default(1)
+
+  @@index([telefone])
+  @@map("numeros_registrados")
+}
+
+model Usuario {
+  id              Int       @id @default(autoincrement())
+  telefone        String    @unique
+  nome            String
+  email           String?
+  dataCadastro    DateTime  @default(now())
+  trialExpiraEm   DateTime  // Data de expiração do trial (7 dias após cadastro)
+  status          String    @default("trial") // "trial", "ativo", "expirado"
+  assinaturaEm    DateTime? // Data da assinatura (quando assinar)
+  criadoEm        DateTime  @default(now())
+  atualizadoEm    DateTime  @updatedAt
+
+  @@index([telefone])
+  @@index([status])
+  @@map("usuarios")
+}
+
+model Agendamento {
+  id              Int       @id @default(autoincrement())
+  telefone        String
+  descricao       String
+  valor           Float
+  dataAgendamento String    // Data no formato YYYY-MM-DD
+  tipo            String    @default("pagamento") // "pagamento" ou "recebimento"
+  status          String    @default("pendente") // "pendente", "pago", "cancelado"
+  categoria       String?   // Categoria do agendamento
+  notificado      Boolean   @default(false) // Se já foi enviada notificação
+  criadoEm        DateTime  @default(now())
+  atualizadoEm    DateTime  @updatedAt
+
+  @@index([telefone])
+  @@index([dataAgendamento])
+  @@index([status])
+  @@map("agendamentos")
+}
+
+model Categoria {
+  id          Int       @id @default(autoincrement())
+  telefone    String?   // Telefone do usuário (null para categorias padrão globais)
+  nome        String
+  descricao   String?   // Descrição opcional da categoria
+  cor         String?   // Cor em hex para identificação visual (opcional)
+  padrao      Int       @default(0) // 0 = false, 1 = true (SQLite não tem boolean)
+  tipo        String    @default("saida") // "entrada", "saida" ou "ambos"
+  criadoEm    DateTime  @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([telefone])
+  @@index([padrao])
+  @@map("categorias")
+}
