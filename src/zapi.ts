@@ -152,6 +152,15 @@ export async function enviarMensagemZApi(
         console.error('   4. Aguarde alguns segundos após conectar a instância');
         console.error('   5. Token atual sendo usado:', zapiConfig.token.substring(0, 10) + '...' + zapiConfig.token.substring(zapiConfig.token.length - 5));
         console.error('   6. Instance ID:', zapiConfig.instanceId);
+      } else if (mensagemErro.includes('não encontrado') || mensagemErro.includes('not found') || mensagemErro.includes('precisa ter enviado')) {
+        mensagemErro = 'Número não encontrado. É necessário que o usuário tenha enviado pelo menos uma mensagem para este número via WhatsApp primeiro.';
+        console.error('💡 ERRO: Número não encontrado na Z-API');
+        console.error('   Isso geralmente acontece quando:');
+        console.error('   1. O número nunca enviou uma mensagem para o WhatsApp da instância');
+        console.error('   2. Os dados da instância foram apagados/resetados');
+        console.error('   3. A instância foi desconectada e reconectada');
+        console.error('   SOLUÇÃO: O usuário precisa enviar uma mensagem primeiro para o número do WhatsApp da instância');
+        console.error('   Número tentado:', numeroFormatado);
       }
       
       return {

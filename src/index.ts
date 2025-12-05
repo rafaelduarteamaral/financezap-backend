@@ -1680,7 +1680,7 @@ app.post('/api/auth/solicitar-codigo', async (req, res) => {
     console.log('═══════════════════════════════════════════════════════════\n');
     
     // Envia código via WhatsApp (usa Z-API se configurada, caso contrário Twilio)
-    const mensagem = `🔐 Seu código de verificação FinanceZap é: *${codigo}*\n\nEste código expira em 5 minutos.\n\nSe você não solicitou este código, ignore esta mensagem.`;
+    const mensagem = `🔐 Seu código de verificação Zela é: *${codigo}*\n\nEste código expira em 5 minutos.\n\nSe você não solicitou este código, ignore esta mensagem.`;
     
     let mensagemEnviada = false;
     let erroEnvio: any = null;
@@ -2161,7 +2161,7 @@ app.post('/api/auth/enviar-contato', autenticarMiddleware, validarPermissaoDados
     // Prioriza Z-API, depois Twilio
     let numeroAgenteFormatado = ''; // Formato: (61) 98147-4690
     let numeroAgenteCompleto = ''; // Formato: +5561981474690
-    let nomeAgente = 'FinanceZap';
+    let nomeAgente = 'Zela';
     
     if (zapiEstaConfigurada()) {
       // Para Z-API, usa o número do .env ou padrão
@@ -2196,7 +2196,7 @@ app.post('/api/auth/enviar-contato', autenticarMiddleware, validarPermissaoDados
 
     // Monta a mensagem com instruções para salvar o contato
     const numeroParaSalvar = numeroAgenteCompleto.replace('+', ''); // Remove o + para facilitar a cópia
-    const mensagem = `📱 *Salvar Contato do FinanceZap*\n\n` +
+    const mensagem = `📱 *Salvar Contato do Zela*\n\n` +
       `Olá ${usuario.nome || 'usuário'}! 👋\n\n` +
       `Para não perder nossas mensagens importantes, salve nosso contato no seu WhatsApp:\n\n` +
       `📝 *Nome:* ${nomeAgente}\n` +
