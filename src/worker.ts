@@ -2140,140 +2140,20 @@ app.delete('/api/agendamentos/:id', async (c) => {
 // ========== ENDPOINTS DE NOTIFICAÇÕES ==========
 
 // Buscar notificações não lidas
+// Rota de notificações desabilitada
 app.get('/api/notificacoes', async (c) => {
-  try {
-    console.log('📬 GET /api/notificacoes - Iniciando...');
-    
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.warn('⚠️ Token não fornecido');
-      return c.json({ success: false, error: 'Token não fornecido' }, 401);
-    }
-    
-    const token = authHeader.substring(7);
-    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
-    
-    let telefoneFormatado: string;
-    try {
-      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
-      telefoneFormatado = formatarTelefone(telefone);
-      console.log(`📞 Telefone extraído: ${telefoneFormatado}`);
-    } catch (error: any) {
-      console.error('❌ Erro ao extrair telefone do token:', error);
-      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
-    }
-    
-    // Remove o prefixo whatsapp: para buscar no banco
-    const telefoneParaBusca = telefoneFormatado.replace('whatsapp:', '').replace('+', '');
-    console.log(`🔍 Buscando notificações para telefone: ${telefoneParaBusca}`);
-    
-    if (!c.env.financezap_db) {
-      console.error('❌ Database não disponível');
-      return c.json({ success: false, error: 'Database não disponível' }, 500);
-    }
-    
-    console.log('📊 Chamando buscarNotificacoesNaoLidasD1...');
-    const notificacoes = await buscarNotificacoesNaoLidasD1(c.env.financezap_db, telefoneParaBusca);
-    console.log(`✅ Notificações recebidas: ${Array.isArray(notificacoes) ? notificacoes.length : 'não é array'}`);
-    
-    if (!Array.isArray(notificacoes)) {
-      console.error('❌ Notificações não é um array:', typeof notificacoes, notificacoes);
-      return c.json({ success: false, error: 'Erro ao buscar notificações' }, 500);
-    }
-    
-    // Valida e processa notificações com tratamento de erro robusto
-    const notificacoesProcessadas = notificacoes
-      .filter(not => {
-        // Filtra notificações inválidas
-        if (!not || typeof not !== 'object') {
-          console.warn('⚠️ Notificação inválida filtrada:', not);
-          return false;
-        }
-        return true;
-      })
-      .map(not => {
-        try {
-          let dadosParsed = {};
-          try {
-            if (not.dados) {
-              dadosParsed = typeof not.dados === 'string' ? JSON.parse(not.dados) : (not.dados || {});
-            }
-          } catch (e) {
-            console.error('Erro ao fazer parse dos dados da notificação:', e);
-            dadosParsed = {};
-          }
-          
-          return {
-            id: not.id || null,
-            telefone: not.telefone || '',
-            tipo: not.tipo || '',
-            dados: dadosParsed,
-            lida: not.lida === 1,
-            criadoEm: not.criadoEm || new Date().toISOString(),
-          };
-        } catch (error: any) {
-          console.error('❌ Erro ao processar notificação individual:', error);
-          console.error('   Notificação:', JSON.stringify(not, null, 2));
-          return null;
-        }
-      })
-      .filter(not => not !== null);
-    
-    return c.json({
-      success: true,
-      notificacoes: notificacoesProcessadas
-    });
-  } catch (error: any) {
-    console.error('Erro em GET /api/notificacoes:', error);
-    return c.json({ success: false, error: error.message || 'Erro ao buscar notificações' }, 500);
-  }
+  return c.json({ 
+    success: false, 
+    error: 'Notificações desabilitadas. Use o botão "Atualizar" para atualizar os dados manualmente.' 
+  }, 503);
 });
 
-// Marcar notificações como lidas
+// Rota de notificações desabilitada
 app.put('/api/notificacoes', async (c) => {
-  try {
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return c.json({ success: false, error: 'Token não fornecido' }, 401);
-    }
-    
-    const token = authHeader.substring(7);
-    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
-    
-    let telefoneFormatado: string;
-    try {
-      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
-      telefoneFormatado = formatarTelefone(telefone);
-    } catch (error: any) {
-      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
-    }
-    
-    let body: { ids?: number[] } = {};
-    try {
-      body = await c.req.json();
-    } catch {
-      // Body vazio ou inválido - marcar todas
-    }
-    const ids = body.ids; // Array opcional de IDs para marcar específicas
-    
-    // Remove o prefixo whatsapp: para buscar no banco
-    const telefoneParaBusca = telefoneFormatado.replace('whatsapp:', '').replace('+', '');
-    
-    const marcadas = await marcarNotificacoesComoLidasD1(
-      c.env.financezap_db,
-      telefoneParaBusca,
-      Array.isArray(ids) ? ids : undefined
-    );
-    
-    return c.json({
-      success: true,
-      marcadas,
-      message: `${marcadas} notificação(ões) marcada(s) como lida(s)`
-    });
-  } catch (error: any) {
-    console.error('Erro em PUT /api/notificacoes:', error);
-    return c.json({ success: false, error: error.message || 'Erro ao marcar notificações como lidas' }, 500);
-  }
+  return c.json({ 
+    success: false, 
+    error: 'Notificações desabilitadas. Use o botão "Atualizar" para atualizar os dados manualmente.' 
+  }, 503);
 });
 
 // Webhook Z-API (versão simplificada para Worker)
