@@ -4,6 +4,9 @@ compatibility_date = "2025-02-01"
 compatibility_flags = ["nodejs_compat"]
 tsconfig = "tsconfig.worker.json"
 
+# Habilitar workers.dev subdomain (gratuito)
+workers_dev = true
+
 [[d1_databases]]
 binding = "financezap_db"
 database_name = "financezap-db"
@@ -12,7 +15,20 @@ migrations_dir = "prisma/migrations"
 
 [vars]
 # Ajuste as origens permitidas do frontend (separadas por vírgula)
-ALLOWED_ORIGINS = "http://localhost:5173,https://seu-dominio.com"
-TWILIO_ACCOUNT_SID = ""
-TWILIO_AUTH_TOKEN = ""
-TWILIO_WHATSAPP_NUMBER = ""
+# URLs permitidas para CORS
+ALLOWED_ORIGINS = "https://usezela.com,https://www.usezela.com,https://*.usezela.com,https://financezap-frontend.pages.dev,https://*.financezap-frontend.pages.dev,http://localhost:5173,http://localhost:3000"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1

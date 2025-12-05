@@ -21,6 +21,10 @@ import {
   atualizarStatusAgendamentoD1,
   removerAgendamentoD1,
   criarAgendamentoD1,
+  salvarNotificacaoD1,
+  buscarNotificacoesNaoLidasD1,
+  marcarNotificacoesComoLidasD1,
+  excluirTodosDadosUsuario,
 } from './d1';
 import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from './codigoVerificacao';
 import jwt from '@tsndr/cloudflare-worker-jwt';
@@ -55,6 +59,130 @@ type Bindings = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+
+// Armazena clientes SSE conectados (por telefone)
+const clientesSSE = new Map<string, ReadableStreamDefaultController[]>();
+
+// Função para notificar clientes SSE sobre novas transações
+// Se db for fornecido e não encontrar clientes SSE, salva notificação no D1 para polling
+function notificarClientesSSE(telefone: string, evento: string, dados: any, db?: D1Database) {
+  // Normaliza o telefone recebido (pode vir em vários formatos)
+  let telefoneNormalizado = telefone;
+  
+  // Remove prefixos comuns
+  telefoneNormalizado = telefoneNormalizado.replace('whatsapp:', '').trim();
+  
+  // Garante que tem o + no início
+  if (!telefoneNormalizado.startsWith('+')) {
+    telefoneNormalizado = '+' + telefoneNormalizado;
+  }
+  
+  // Remove o + para criar variações
+  const telefoneSemMais = telefoneNormalizado.replace(/^\+/, '');
+  
+  // Cria todas as variações possíveis do telefone
+  const telefonesParaNotificar = [
+    telefoneNormalizado,                    // +5561981474690
+    telefoneSemMais,                        // 5561981474690
+    `whatsapp:${telefoneNormalizado}`,      // whatsapp:+5561981474690
+    `whatsapp:${telefoneSemMais}`,          // whatsapp:5561981474690
+    // Variações com/sem o 9 (para números brasileiros)
+    ...(telefoneSemMais.startsWith('55') && telefoneSemMais.length === 13 ? [
+      telefoneSemMais.substring(0, 4) + telefoneSemMais.substring(5), // Remove o 9
+      `+${telefoneSemMais.substring(0, 4)}${telefoneSemMais.substring(5)}`,
+    ] : []),
+    ...(telefoneSemMais.startsWith('55') && telefoneSemMais.length === 12 ? [
+      telefoneSemMais.substring(0, 4) + '9' + telefoneSemMais.substring(4), // Adiciona o 9
+      `+${telefoneSemMais.substring(0, 4)}9${telefoneSemMais.substring(4)}`,
+    ] : []),
+  ];
+  
+  console.log(`📡 SSE: Tentando notificar telefone original: ${telefone}`);
+  console.log(`📡 SSE: Telefone normalizado: ${telefoneNormalizado}`);
+  console.log(`📡 SSE: Variações a tentar:`, telefonesParaNotificar);
+  console.log(`📡 SSE: Clientes conectados:`, Array.from(clientesSSE.keys()));
+  
+  let notificados = 0;
+  telefonesParaNotificar.forEach(tel => {
+    const clientes = clientesSSE.get(tel);
+    if (clientes && clientes.length > 0) {
+      console.log(`📡 SSE: ✅ Encontrados ${clientes.length} cliente(s) para telefone: ${tel}`);
+      const mensagem = `event: ${evento}\ndata: ${JSON.stringify(dados)}\n\n`;
+      clientes.forEach(controller => {
+        try {
+          controller.enqueue(new TextEncoder().encode(mensagem));
+          notificados++;
+          console.log(`✅ SSE: Mensagem enviada para cliente (evento: ${evento})`);
+        } catch (error) {
+          console.error('❌ Erro ao enviar mensagem SSE:', error);
+        }
+      });
+    } else {
+      console.log(`⚠️ SSE: Nenhum cliente encontrado para telefone: ${tel}`);
+    }
+  });
+  
+  if (notificados > 0) {
+    console.log(`📡 SSE: ✅ Notificados ${notificados} cliente(s) SSE para telefone: ${telefoneNormalizado}`);
+  } else {
+    console.warn(`⚠️ SSE: ❌ Nenhum cliente foi notificado para telefone: ${telefoneNormalizado}`);
+    console.warn(`⚠️ SSE: Verifique se o telefone usado na conexão SSE corresponde ao telefone da transação`);
+    
+    // FALLBACK: Se não encontrou nenhum cliente, tenta notificar TODOS os clientes conectados
+    // Isso é útil quando há um problema de correspondência de telefone
+    console.log(`🔄 SSE: Tentando fallback - notificando todos os clientes conectados...`);
+    let fallbackNotificados = 0;
+    clientesSSE.forEach((clientes, tel) => {
+      if (clientes.length > 0) {
+        console.log(`📡 SSE: Fallback - notificando ${clientes.length} cliente(s) no telefone: ${tel}`);
+        const mensagem = `event: ${evento}\ndata: ${JSON.stringify(dados)}\n\n`;
+        clientes.forEach(controller => {
+          try {
+            controller.enqueue(new TextEncoder().encode(mensagem));
+            fallbackNotificados++;
+            console.log(`✅ SSE: Mensagem enviada via fallback (evento: ${evento})`);
+          } catch (error) {
+            console.error('❌ Erro ao enviar mensagem SSE (fallback):', error);
+          }
+        });
+      }
+    });
+    
+    if (fallbackNotificados > 0) {
+      console.log(`📡 SSE: ✅ Fallback - Notificados ${fallbackNotificados} cliente(s) SSE`);
+    } else {
+      console.warn(`⚠️ SSE: ❌ Fallback também não encontrou clientes. Total de clientes SSE: ${clientesSSE.size}`);
+      // Salva notificação no D1 para o frontend consultar via polling
+      if (db) {
+        salvarNotificacaoFallback(db, telefoneNormalizado, evento, dados).catch(err => {
+          console.error('❌ Erro ao salvar notificação no D1:', err);
+        });
+      }
+    }
+  }
+}
+
+// Função auxiliar para salvar notificação no D1 quando SSE não funciona
+async function salvarNotificacaoFallback(db: D1Database, telefone: string, evento: string, dados: any) {
+  try {
+    // Normaliza telefone para buscar no banco
+    const telefoneNormalizado = telefone.replace('whatsapp:', '').replace(/^\+/, '').trim();
+    
+    // Busca o telefone do usuário no banco
+    const usuario = await buscarUsuarioPorTelefone(db, telefoneNormalizado);
+    if (usuario && usuario.telefone) {
+      const telefoneParaNotificar = usuario.telefone.replace('whatsapp:', '').replace(/^\+/, '').trim();
+      await salvarNotificacaoD1(db, telefoneParaNotificar, evento, dados);
+      console.log(`💾 SSE: Notificação salva no D1 para telefone: ${telefoneParaNotificar}`);
+    } else {
+      // Se não encontrou usuário, salva com o telefone normalizado mesmo
+      await salvarNotificacaoD1(db, telefoneNormalizado, evento, dados);
+      console.log(`💾 SSE: Notificação salva no D1 para telefone: ${telefoneNormalizado}`);
+    }
+  } catch (error) {
+    console.error('❌ Erro ao salvar notificação no D1:', error);
+  }
+}
 
 function parseAllowedOrigins(raw?: string): string[] {
   return (raw || '')
@@ -110,7 +238,7 @@ app.use(
       return allowed[0] || '*';
     },
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cache-Control'],
     credentials: true,
     maxAge: 86400,
   })
@@ -190,28 +318,357 @@ function telefoneVariacoes(telefone: string): string[] {
   return [...new Set(variacoes)].filter(Boolean);
 }
 
-// Função auxiliar para comparar telefones (considera todas as variações)
-function telefonesCorrespondem(telefone1: string, telefone2: string): boolean {
-  // Normaliza ambos para comparação direta
-  const normalizar = (tel: string) => tel.replace(/^whatsapp:/i, '').replace(/^\+/, '').trim();
-  const tel1Norm = normalizar(telefone1);
-  const tel2Norm = normalizar(telefone2);
+// Função auxiliar para normalizar telefone (mesma lógica usada ao salvar transações)
+function normalizarTelefoneParaComparacao(telefone: string): string {
+  // Remove apenas o prefixo whatsapp: mas mantém o + e o número
+  return telefone.replace(/^whatsapp:/i, '').trim();
+}
+
+// Função para criar variações com/sem dígito 9 (para números brasileiros)
+function criarVariacoesComSem9(telefone: string): string[] {
+  const apenasNumeros = telefone.replace(/\D/g, '');
+  const variacoes: string[] = [apenasNumeros];
   
-  // Comparação direta
-  if (tel1Norm === tel2Norm) {
+  // Se é número brasileiro (começa com 55)
+  if (apenasNumeros.startsWith('55') && apenasNumeros.length >= 12) {
+    const ddd = apenasNumeros.substring(2, 4); // DDD (2 dígitos após o 55)
+    const resto = apenasNumeros.substring(4); // Resto do número após DDD
+    
+    // Números brasileiros podem ter 8 ou 9 dígitos após o DDD
+    // Se tem 9 dígitos e começa com 9, cria variação sem 9 (8 dígitos)
+    if (resto.length === 9 && resto.startsWith('9')) {
+      const sem9 = `55${ddd}${resto.substring(1)}`; // Remove o 9
+      variacoes.push(sem9);
+      console.log(`   🔄 Criada variação sem 9: ${sem9} (original: ${apenasNumeros})`);
+    }
+    // Se tem 8 dígitos e não começa com 9, cria variação com 9 (9 dígitos)
+    else if (resto.length === 8 && !resto.startsWith('9')) {
+      const com9 = `55${ddd}9${resto}`; // Adiciona o 9
+      variacoes.push(com9);
+      console.log(`   🔄 Criada variação com 9: ${com9} (original: ${apenasNumeros})`);
+    }
+    // Se tem 10 dígitos (formato antigo com 9), cria variação sem 9
+    else if (resto.length === 10 && resto.startsWith('9')) {
+      const sem9 = `55${ddd}${resto.substring(1)}`;
+      variacoes.push(sem9);
+      console.log(`   🔄 Criada variação sem 9 (10->9): ${sem9} (original: ${apenasNumeros})`);
+    }
+  }
+  
+  return variacoes;
+}
+
+// Função auxiliar para comparar telefones (considera todas as variações, incluindo dígito 9)
+function telefonesCorrespondem(telefone1: string, telefone2: string): boolean {
+  // Normaliza ambos usando a mesma função usada ao salvar transações
+  const tel1Norm = normalizarTelefoneParaComparacao(telefone1);
+  const tel2Norm = normalizarTelefoneParaComparacao(telefone2);
+  
+  // Remove o + para obter apenas números
+  const tel1SemMais = tel1Norm.replace(/^\+/, '');
+  const tel2SemMais = tel2Norm.replace(/^\+/, '');
+  
+  // Comparação direta após normalização
+  if (tel1SemMais === tel2SemMais) {
+    console.log(`✅ Telefones correspondem (direto): "${tel1SemMais}" === "${tel2SemMais}"`);
     return true;
   }
   
-  // Compara todas as variações
-  const variacoes1 = telefoneVariacoes(telefone1);
-  const variacoes2 = telefoneVariacoes(telefone2);
+  // Cria variações com/sem dígito 9 para ambos os telefones
+  const variacoes1 = criarVariacoesComSem9(tel1SemMais);
+  const variacoes2 = criarVariacoesComSem9(tel2SemMais);
   
-  // Normaliza todas as variações para comparação
-  const variacoes1Norm = variacoes1.map(normalizar);
-  const variacoes2Norm = variacoes2.map(normalizar);
+  console.log(`   🔍 Variações criadas para telefone 1 (${tel1SemMais}):`, variacoes1);
+  console.log(`   🔍 Variações criadas para telefone 2 (${tel2SemMais}):`, variacoes2);
   
-  // Verifica se há alguma correspondência
-  return variacoes1Norm.some(v1 => variacoes2Norm.includes(v1));
+  // Verifica se há alguma correspondência entre as variações
+  const corresponde = variacoes1.some(v1 => variacoes2.includes(v1));
+  
+  if (corresponde) {
+    const variacaoCorrespondente = variacoes1.find(v1 => variacoes2.includes(v1));
+    console.log(`✅ Telefones correspondem (variações com/sem 9): "${telefone1}" <-> "${telefone2}"`);
+    console.log(`   Variação correspondente: ${variacaoCorrespondente}`);
+    return true;
+  } else {
+    // Tenta também com as variações completas (incluindo prefixos)
+    const variacoesCompletas1 = telefoneVariacoes(telefone1);
+    const variacoesCompletas2 = telefoneVariacoes(telefone2);
+    
+    const variacoesCompletas1Norm = variacoesCompletas1.map(v => v.replace(/^whatsapp:/i, '').replace(/^\+/, ''));
+    const variacoesCompletas2Norm = variacoesCompletas2.map(v => v.replace(/^whatsapp:/i, '').replace(/^\+/, ''));
+    
+    const correspondeCompleto = variacoesCompletas1Norm.some(v1 => variacoesCompletas2Norm.includes(v1));
+    
+    if (correspondeCompleto) {
+      console.log(`✅ Telefones correspondem (variações completas): "${telefone1}" <-> "${telefone2}"`);
+      return true;
+    }
+    
+    console.log(`❌ Telefones NÃO correspondem: "${telefone1}" <-> "${telefone2}"`);
+    console.log(`   Normalizados: "${tel1Norm}" <-> "${tel2Norm}"`);
+    console.log(`   Sem +: "${tel1SemMais}" <-> "${tel2SemMais}"`);
+    console.log(`   Variações 1: ${variacoes1.join(', ')}`);
+    console.log(`   Variações 2: ${variacoes2.join(', ')}`);
+  }
+  
+  return corresponde;
+}
+
+// Interface para transação extraída pela IA
+interface TransacaoExtraidaIA {
+  descricao: string;
+  valor: number;
+  categoria: string;
+  tipo: 'entrada' | 'saida';
+  metodo?: 'credito' | 'debito';
+  sucesso: boolean;
+}
+
+// Função para processar mensagem com IA (compatível com Workers)
+async function processarMensagemComIAWorker(
+  mensagem: string,
+  env: Bindings
+): Promise<TransacaoExtraidaIA[]> {
+  const temGroq = env.GROQ_API_KEY && env.GROQ_API_KEY.trim() !== '';
+  const temGemini = env.GEMINI_API_KEY && env.GEMINI_API_KEY.trim() !== '';
+  const IA_PROVIDER = (env.IA_PROVIDER || '').toLowerCase().trim();
+
+  if (!temGroq && !temGemini) {
+    throw new Error('Nenhuma API de IA configurada. Configure GROQ_API_KEY ou GEMINI_API_KEY no Cloudflare Workers.');
+  }
+
+  const prompt = `Analise a seguinte mensagem e extraia TODAS as transações financeiras mencionadas.
+
+Mensagem: "${mensagem}"
+
+⚠️ IMPORTANTE: A mensagem pode conter MÚLTIPLAS transações em linhas separadas ou na mesma linha.
+Cada linha ou item mencionado com um valor deve ser extraído como uma transação separada.
+
+EXEMPLOS DE MENSAGENS COM MÚLTIPLAS TRANSAÇÕES:
+- "corte de cabelo 25 reais\nsalao de beleza 25 reais\nbarbearia 25 reais" = 3 transações
+- "comprei pão por 5 reais, leite por 8 e café por 12" = 3 transações
+- "gastei 50 com gasolina\n30 com almoço\n20 com estacionamento" = 3 transações
+- "corte de cabelo 25 reais\nsalao de beleza 25 reais" = 2 transações
+
+Retorne APENAS um JSON válido com o seguinte formato:
+{
+  "transacoes": [
+    {
+      "descricao": "descrição do item/serviço",
+      "valor": 50.00,
+      "categoria": "comida",
+      "tipo": "saida",
+      "metodo": "debito"
+    }
+  ]
+}
+
+Regras:
+- Extraia TODAS as transações mencionadas, mesmo que estejam em linhas separadas
+- Se a mensagem tiver múltiplas linhas, cada linha com um valor deve ser uma transação separada
+- Se a mensagem tiver múltiplos itens na mesma linha (separados por vírgula, "e", ou quebra de linha), extraia cada um separadamente
+- O valor deve ser um número (sem R$ ou "reais")
+- A descrição deve ser clara e objetiva (ex: "corte de cabelo", "salao de beleza", "barbearia")
+- A categoria deve ser uma palavra simples que agrupa o tipo de gasto
+- Categorias comuns: comida, transporte, lazer, saúde, educação, moradia, roupas, tecnologia, serviços, outros
+- Para serviços de beleza/cabelo: use categoria "serviços" ou "lazer"
+
+- TIPO (CRÍTICO - leia com MUITA atenção):
+  
+  ⚠️ REGRA PRIMEIRA: Analise o CONTEXTO e o VERBO da mensagem para determinar se o dinheiro ENTRA ou SAI.
+  
+  ✅ Use "entrada" quando o dinheiro ENTRA na sua conta (você RECEBE dinheiro):
+    - VERBOS DE ENTRADA: "recebi", "recebido", "recebimento", "ganhei", "ganho", "vendi", "venda", "depositei", "depósito", "entrou", "chegou", "lucro", "rendimento", "dividendos", "juros"
+    - PALAVRAS-CHAVE DE ENTRADA: "salário", "pagamento recebido", "me pagou", "me pagaram", "pagou para mim", "acabou de me pagar", "transferência recebida", "dinheiro recebido", "receita", "entrada de dinheiro", "renda"
+    - EXEMPLOS OBRIGATÓRIOS (SEMPRE são "entrada"):
+      ✅ "recebi um salário de 100 reais" = ENTRADA
+      ✅ "recebi 500 reais" = ENTRADA
+      ✅ "recebi salário" = ENTRADA
+      ✅ "me pagaram 2000 reais" = ENTRADA
+      ✅ "vendi meu carro por 15000" = ENTRADA
+      ✅ "ganhei 300 reais" = ENTRADA
+      ✅ "depositei 500 reais" = ENTRADA
+      ✅ "recebi pagamento do cliente" = ENTRADA
+      ✅ "o chefe me pagou 1500" = ENTRADA
+      ✅ "recebi 100 de salário" = ENTRADA
+      ✅ "salário de 2000 reais" = ENTRADA
+  
+  ❌ Use "saida" quando o dinheiro SAI da sua conta (você PAGA ou GASTA):
+    - VERBOS DE SAÍDA: "comprei", "paguei", "gastei", "despensei", "saquei", "transferi", "enviei", "paguei por", "gastei com"
+    - PALAVRAS-CHAVE DE SAÍDA: "despesa", "saída", "saque", "pagamento feito", "transferência enviada", "compras", "gastos"
+    - EXEMPLOS OBRIGATÓRIOS (SEMPRE são "saida"):
+      ❌ "comprei um sanduíche por 20 reais" = SAIDA
+      ❌ "paguei 150 reais de conta de luz" = SAIDA
+      ❌ "gastei 50 reais" = SAIDA
+      ❌ "comprei café por 5 reais" = SAIDA
+  
+  🔍 ANÁLISE DE CONTEXTO:
+    - Se a mensagem começa com "recebi", "ganhei", "vendi", "me pagaram" = SEMPRE "entrada"
+    - Se a mensagem começa com "comprei", "paguei", "gastei" = SEMPRE "saida"
+    - Se mencionar "salário" = SEMPRE "entrada" (salário é sempre dinheiro que você recebe)
+    - Se mencionar "venda" = SEMPRE "entrada" (venda é dinheiro que você recebe)
+    - Se mencionar "compra" = SEMPRE "saida" (compra é dinheiro que você gasta)
+  
+  ⚠️ ATENÇÃO ESPECIAL: 
+    - "recebi salário" = ENTRADA (não importa o valor, salário é sempre entrada)
+    - "recebi um salário de X reais" = ENTRADA
+    - "recebi X reais" = ENTRADA
+    - Qualquer frase com "recebi" + valor = ENTRADA
+
+- MÉTODO: "credito" se mencionar cartão de crédito, crédito, parcelado, ou "debito" se mencionar débito, dinheiro, pix, transferência. Se não mencionar, use "debito"
+- Se não houver transações, retorne {"transacoes": []}
+- Retorne APENAS o JSON, sem texto adicional`;
+
+  // Palavras-chave para validação adicional
+  const palavrasEntrada = [
+    'recebi', 'recebido', 'recebimento', 'ganhei', 'ganho', 'vendi', 'venda',
+    'salário', 'salario', 'me pagou', 'me pagaram', 'pagou para mim',
+    'acabou de me pagar', 'depositei', 'depósito', 'deposito',
+    'transferência recebida', 'transferencia recebida', 'dinheiro recebido',
+    'lucro', 'rendimento', 'dividendos', 'juros', 'receita', 'renda'
+  ];
+  
+  const palavrasSaida = [
+    'comprei', 'paguei', 'gastei', 'despensei', 'saquei', 'transferi',
+    'enviei', 'despesa', 'saída', 'saida', 'saque', 'pagamento feito',
+    'compras', 'gastos'
+  ];
+  
+  const mensagemLower = mensagem.toLowerCase();
+
+  try {
+    let resposta: string;
+
+    // Tenta Groq primeiro (se configurado)
+    if ((IA_PROVIDER === 'groq' || !IA_PROVIDER) && temGroq) {
+      try {
+        console.log('🤖 Processando mensagem com Groq...');
+        const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'llama-3.1-8b-instant',
+            messages: [
+              {
+                role: 'system',
+                content: 'Você é um assistente especializado em extrair informações financeiras de mensagens de texto. Sempre retorne JSON válido.'
+              },
+              {
+                role: 'user',
+                content: prompt
+              }
+            ],
+            temperature: 0.3,
+            max_tokens: 500
+          }),
+        });
+
+        if (!groqResponse.ok) {
+          throw new Error(`Groq API error: ${groqResponse.status}`);
+        }
+
+        const groqData = await groqResponse.json();
+        resposta = groqData.choices[0]?.message?.content || '{}';
+      } catch (error: any) {
+        console.warn('⚠️  Erro ao usar Groq, tentando Gemini...', error.message);
+        if (temGemini) {
+          const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{
+                parts: [{ text: prompt }]
+              }]
+            }),
+          });
+
+          if (!geminiResponse.ok) {
+            throw new Error(`Gemini API error: ${geminiResponse.status}`);
+          }
+
+          const geminiData = await geminiResponse.json();
+          resposta = geminiData.candidates[0]?.content?.parts[0]?.text || '{}';
+        } else {
+          throw error;
+        }
+      }
+    } else if (temGemini) {
+      // Usa Gemini diretamente
+      const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: prompt }]
+          }]
+        }),
+      });
+
+      if (!geminiResponse.ok) {
+        throw new Error(`Gemini API error: ${geminiResponse.status}`);
+      }
+
+      const geminiData = await geminiResponse.json();
+      resposta = geminiData.candidates[0]?.content?.parts[0]?.text || '{}';
+    } else {
+      throw new Error('Nenhuma IA disponível');
+    }
+
+    // Extrai JSON da resposta
+    let jsonStr = resposta.trim();
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    }
+    
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
+
+    const resultado = JSON.parse(jsonStr);
+    
+    if (resultado.transacoes && Array.isArray(resultado.transacoes)) {
+      return resultado.transacoes.map((t: any) => {
+        // Validação dupla: verifica palavras-chave na mensagem original
+        let tipoFinal = 'saida';
+        
+        if (t.tipo) {
+          const tipoLower = String(t.tipo).toLowerCase().trim();
+          if (tipoLower === 'entrada') {
+            tipoFinal = 'entrada';
+          }
+        }
+        
+        // Validação adicional: verifica palavras-chave na mensagem
+        const temPalavraEntrada = palavrasEntrada.some(palavra => mensagemLower.includes(palavra));
+        const temPalavraSaida = palavrasSaida.some(palavra => mensagemLower.includes(palavra));
+        
+        if (temPalavraEntrada && !temPalavraSaida) {
+          tipoFinal = 'entrada';
+          console.log(`   ✅ CORREÇÃO: Tipo corrigido para "entrada" baseado em palavras-chave`);
+        } else if (temPalavraSaida && !temPalavraEntrada) {
+          tipoFinal = 'saida';
+        }
+        
+        return {
+          descricao: t.descricao || 'Transação',
+          valor: parseFloat(t.valor) || 0,
+          categoria: t.categoria || 'outros',
+          tipo: tipoFinal as 'entrada' | 'saida',
+          metodo: (t.metodo && t.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito' as 'credito' | 'debito',
+          sucesso: true
+        };
+      }).filter((t: TransacaoExtraidaIA) => t.valor > 0);
+    }
+
+    return [];
+  } catch (error: any) {
+    console.error('❌ Erro ao processar mensagem com IA:', error);
+    throw error;
+  }
 }
 
 // Função para processar agendamento usando IA (compatível com Workers)
@@ -539,8 +996,9 @@ app.post('/webhook/whatsapp', async (c) => {
   await registrarNumero(c.env.financezap_db, telefone);
 
   const valor = extrairValor(mensagem) ?? 0;
+  const telefoneFormatado = formatarTelefone(telefone);
 
-  await salvarTransacao(c.env.financezap_db, {
+  const transacaoId = await salvarTransacao(c.env.financezap_db, {
     telefone,
     descricao: mensagem || 'Mensagem recebida',
     valor,
@@ -550,6 +1008,13 @@ app.post('/webhook/whatsapp', async (c) => {
     dataHora,
     data,
     mensagemOriginal: mensagem,
+  });
+  
+  // Notifica clientes SSE sobre nova transação
+  notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+    id: transacaoId,
+    tipo: 'transacao',
+    mensagem: 'Nova transação registrada'
   });
 
   const twiml = `<Response><Message>Recebido! Registramos sua mensagem.</Message></Response>`;
@@ -590,30 +1055,30 @@ app.get('/api/transacoes', async (c) => {
       }, 401);
     }
     
-    const query = c.req.query();
-    const valorMin = query.valorMin !== undefined ? Number(query.valorMin) : undefined;
-    const valorMax = query.valorMax !== undefined ? Number(query.valorMax) : undefined;
-    const limit = query.limit !== undefined ? Number(query.limit) : undefined;
-    const page = query.page !== undefined ? Number(query.page) : undefined;
-    const offset = page && limit ? (page - 1) * limit : undefined;
+  const query = c.req.query();
+  const valorMin = query.valorMin !== undefined ? Number(query.valorMin) : undefined;
+  const valorMax = query.valorMax !== undefined ? Number(query.valorMax) : undefined;
+  const limit = query.limit !== undefined ? Number(query.limit) : undefined;
+  const page = query.page !== undefined ? Number(query.page) : undefined;
+  const offset = page && limit ? (page - 1) * limit : undefined;
 
-    const { transacoes, total } = await buscarTransacoes(c.env.financezap_db, {
+  const { transacoes, total } = await buscarTransacoes(c.env.financezap_db, {
       telefone: telefoneFormatado, // SEMPRE usa o telefone do token, nunca da query string
-      dataInicio: query.dataInicio,
-      dataFim: query.dataFim,
-      valorMin: Number.isFinite(valorMin) ? valorMin : undefined,
-      valorMax: Number.isFinite(valorMax) ? valorMax : undefined,
-      descricao: query.descricao,
-      categoria: query.categoria,
-      limit: Number.isFinite(limit) ? limit : undefined,
-      offset: Number.isFinite(offset) ? offset : undefined,
-    });
+    dataInicio: query.dataInicio,
+    dataFim: query.dataFim,
+    valorMin: Number.isFinite(valorMin) ? valorMin : undefined,
+    valorMax: Number.isFinite(valorMax) ? valorMax : undefined,
+    descricao: query.descricao,
+    categoria: query.categoria,
+    limit: Number.isFinite(limit) ? limit : undefined,
+    offset: Number.isFinite(offset) ? offset : undefined,
+  });
 
-    return c.json({
-      success: true,
-      total,
-      transacoes,
-    });
+  return c.json({
+    success: true,
+    total,
+    transacoes,
+  });
   } catch (error: any) {
     console.error('Erro em GET /api/transacoes:', error);
     return c.json({ success: false, error: error.message || 'Erro ao buscar transações' }, 500);
@@ -638,11 +1103,11 @@ app.delete('/api/transacoes/:id', async (c) => {
     } catch (error: any) {
       return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
     }
-    const id = Number(c.req.param('id'));
+  const id = Number(c.req.param('id'));
     
-    if (!Number.isFinite(id)) {
-      return c.json({ success: false, error: 'ID inválido' }, 400);
-    }
+  if (!Number.isFinite(id)) {
+    return c.json({ success: false, error: 'ID inválido' }, 400);
+  }
     
     // Verifica se a transação pertence ao usuário antes de deletar
     const transacao = await c.env.financezap_db
@@ -662,11 +1127,11 @@ app.delete('/api/transacoes/:id', async (c) => {
       return c.json({ success: false, error: 'Você não tem permissão para deletar esta transação' }, 403);
     }
     
-    const removed = await removerTransacao(c.env.financezap_db, id);
-    if (!removed) {
+  const removed = await removerTransacao(c.env.financezap_db, id);
+  if (!removed) {
       return c.json({ success: false, error: 'Erro ao remover transação' }, 500);
-    }
-    return c.json({ success: true });
+  }
+  return c.json({ success: true });
   } catch (error: any) {
     console.error('Erro em DELETE /api/transacoes/:id:', error);
     return c.json({ success: false, error: error.message || 'Erro ao deletar transação' }, 500);
@@ -693,19 +1158,19 @@ app.get('/api/estatisticas', async (c) => {
       return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
     }
     
-    const query = c.req.query();
-    const valorMin = query.valorMin !== undefined ? Number(query.valorMin) : undefined;
-    const valorMax = query.valorMax !== undefined ? Number(query.valorMax) : undefined;
+  const query = c.req.query();
+  const valorMin = query.valorMin !== undefined ? Number(query.valorMin) : undefined;
+  const valorMax = query.valorMax !== undefined ? Number(query.valorMax) : undefined;
 
-    const estatisticas = await calcularEstatisticas(c.env.financezap_db, {
+  const estatisticas = await calcularEstatisticas(c.env.financezap_db, {
       telefone: telefoneFormatado, // SEMPRE usa o telefone do token, nunca da query string
-      dataInicio: query.dataInicio,
-      dataFim: query.dataFim,
-      valorMin: Number.isFinite(valorMin) ? valorMin : undefined,
-      valorMax: Number.isFinite(valorMax) ? valorMax : undefined,
-      descricao: query.descricao,
-      categoria: query.categoria,
-    });
+    dataInicio: query.dataInicio,
+    dataFim: query.dataFim,
+    valorMin: Number.isFinite(valorMin) ? valorMin : undefined,
+    valorMax: Number.isFinite(valorMax) ? valorMax : undefined,
+    descricao: query.descricao,
+    categoria: query.categoria,
+  });
     
     // Garante que os valores numéricos não sejam null/undefined (converte para 0)
     const estatisticasFormatadas = {
@@ -749,11 +1214,11 @@ app.get('/api/gastos-por-dia', async (c) => {
       return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
     }
     
-    const query = c.req.query();
-    const diasRaw = query.dias !== undefined ? Number(query.dias) : NaN;
-    const dias = Number.isFinite(diasRaw) && diasRaw > 0 ? diasRaw : 30;
+  const query = c.req.query();
+  const diasRaw = query.dias !== undefined ? Number(query.dias) : NaN;
+  const dias = Number.isFinite(diasRaw) && diasRaw > 0 ? diasRaw : 30;
     const data = await gastosPorDia(c.env.financezap_db, telefoneFormatado, dias); // SEMPRE usa o telefone do token
-    return c.json({ success: true, data });
+  return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Erro em GET /api/gastos-por-dia:', error);
     return c.json({ success: false, error: error.message || 'Erro ao buscar gastos por dia' }, 500);
@@ -977,13 +1442,84 @@ app.post('/api/auth/cadastro', async (c) => {
       trialExpiraEm: trialExpiraEm,
     });
     
+    // Verifica se é um novo número (primeira vez que se registra)
+    const ehNovoNumero = !(await numeroEstaRegistrado(c.env.financezap_db, telefoneFormatado));
+    
     // Registra o número se ainda não estiver registrado
-    if (!(await numeroEstaRegistrado(c.env.financezap_db, telefoneFormatado))) {
+    if (ehNovoNumero) {
       await registrarNumero(c.env.financezap_db, telefoneFormatado);
     }
     
     console.log(`✅ Usuário cadastrado: ${nome.trim()} (${telefoneFormatado})`);
     console.log(`   Trial expira em: ${trialExpiraEm.toLocaleString('pt-BR')}`);
+    console.log(`   É novo número: ${ehNovoNumero}`);
+    
+    // Envia mensagem de boas-vindas se for um novo usuário
+    if (ehNovoNumero) {
+      try {
+        const mensagemBoasVindas = `Olá! Eu sou a Zela 😄✅, sua assistente financeira inteligente.
+
+Estou aqui para te ajudar a organizar e melhorar sua vida financeira! Comigo, você pode registrar facilmente suas transações e acompanhar suas finanças de forma prática.
+
+Sinta-se à vontade para me usar quando precisar! Vou te acompanhar em cada passo para garantir que suas finanças estejam sempre em ordem! 💚
+
+💸 *Lançamentos rápidos pelo WhatsApp*
+
+* Para despesas e receitas, envie: texto, foto ou áudio.
+
+* Palavras como "recebi" ou "ganhei" → *RECEITA* 💰
+
+* Palavras como "gastei", "comprei" ou, caso não informe → *DESPESA*
+
+* 📅 Sem data informada? Usaremos a *data de hoje* automaticamente.
+
+📌 *Exemplos:*
+
+* Receita: "Recebi 500 reais de salário hoje"
+
+* Despesa: "Gastei 50 reais no supermercado"
+
+* Despesa: "Comprei livro por 40 reais"
+
+🗂 *Categorias e organização automática*
+
+* A IA classifica automaticamente seus lançamentos usando categorias padrão já criadas. ✅
+
+* Na plataforma, você pode criar ou editar categorias e subcategorias para ajudar a IA a organizar melhor suas receitas e despesas.
+
+⏰ *Lembretes automáticos*
+
+* Você pode agendar pagamentos e recebimentos futuros.
+
+* Envie mensagens como "tenho que pagar 300 reais de aluguel no dia 5" ou "agende pagamento de 800 reais de aluguel para o dia 10".
+
+*Plataforma Zela*
+
+* 📊 Analisar suas finanças com gráficos inteligentes, relatórios detalhados e filtros avançados.
+
+* ✍️ Registrar lançamentos de forma detalhada.
+
+* 🏦 Criar contas bancárias para organizar melhor suas transações.
+
+* 📝 Além de muitas outras funcionalidades!
+
+💌 *Gostou do Zela? Indique para um amigo e ajude ele(a) a organizar as finanças também!*
+
+Acesse: https://usezela.com 💚
+
+📞 *Precisa de ajuda, suporte, tem sugestões ou reclamações?*
+
+Entre em contato conosco: contato@usezela.com 📩
+
+🚀 *Vamos lá começar a organizar suas finanças!*`;
+
+        await enviarMensagemZApi(telefoneFormatado, mensagemBoasVindas, c.env);
+        console.log(`📨 Mensagem de boas-vindas enviada para: ${telefoneFormatado}`);
+      } catch (error: any) {
+        console.error('❌ Erro ao enviar mensagem de boas-vindas:', error);
+        // Não falha o cadastro se não conseguir enviar a mensagem
+      }
+    }
     
     return c.json({
       success: true,
@@ -1005,6 +1541,56 @@ app.post('/api/auth/cadastro', async (c) => {
 });
 
 // ========== ENDPOINTS DE AUTENTICAÇÃO ==========
+
+// Endpoint para excluir todos os dados do usuário
+app.delete('/api/auth/excluir-dados', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    console.log(`🗑️ Solicitação de exclusão de dados para: ${telefoneFormatado}`);
+    
+    // Exclui todos os dados do usuário
+    const resultado = await excluirTodosDadosUsuario(c.env.financezap_db, telefoneFormatado);
+    
+    if (resultado.sucesso) {
+      console.log(`✅ Dados excluídos com sucesso para: ${telefoneFormatado}`);
+      console.log(`   Transações removidas: ${resultado.dadosRemovidos?.transacoes || 0}`);
+      console.log(`   Agendamentos removidos: ${resultado.dadosRemovidos?.agendamentos || 0}`);
+      console.log(`   Categorias removidas: ${resultado.dadosRemovidos?.categorias || 0}`);
+      return c.json({
+        success: true,
+        message: 'Todos os seus dados foram excluídos com sucesso',
+        dadosRemovidos: resultado.dadosRemovidos
+      });
+    } else {
+      console.error(`❌ Erro ao excluir dados para: ${telefoneFormatado}`);
+      return c.json({
+        success: false,
+        error: 'Erro ao excluir dados. Tente novamente mais tarde.'
+      }, 500);
+    }
+  } catch (error: any) {
+    console.error('❌ Erro ao excluir dados do usuário:', error);
+    return c.json({
+      success: false,
+      error: error.message || 'Erro ao excluir dados'
+    }, 500);
+  }
+});
 
 // Verificar token e obter dados do usuário
 app.get('/api/auth/verify', async (c) => {
@@ -1292,6 +1878,20 @@ app.put('/api/categorias/:id', async (c) => {
     const body = await c.req.json();
     const { nome, descricao, cor, tipo } = body;
     
+    // Verificação adicional de segurança antes de tentar atualizar
+    const categoriaVerificacao = await c.env.financezap_db
+      .prepare('SELECT padrao FROM categorias WHERE id = ?')
+      .bind(id)
+      .first<{ padrao: number }>();
+    
+    if (categoriaVerificacao && categoriaVerificacao.padrao === 1) {
+      console.warn(`🚫 Tentativa de atualizar categoria padrão bloqueada na rota! ID: ${id}`);
+      return c.json({ 
+        success: false, 
+        error: 'Não é possível atualizar categorias padrão do sistema' 
+      }, 403);
+    }
+    
     await atualizarCategoriaD1(c.env.financezap_db, id, telefoneFormatado, {
       nome: nome?.trim(),
       descricao: descricao?.trim(),
@@ -1338,10 +1938,185 @@ app.delete('/api/categorias/:id', async (c) => {
     }
     
     const id = Number(c.req.param('id'));
+    
+    // Verificação adicional de segurança antes de tentar remover
+    const categoria = await c.env.financezap_db
+      .prepare('SELECT padrao FROM categorias WHERE id = ?')
+      .bind(id)
+      .first<{ padrao: number }>();
+    
+    if (categoria && categoria.padrao === 1) {
+      console.warn(`🚫 Tentativa de remover categoria padrão bloqueada na rota! ID: ${id}`);
+      return c.json({ 
+        success: false, 
+        error: 'Não é possível remover categorias padrão do sistema' 
+      }, 403);
+    }
+    
     await removerCategoriaD1(c.env.financezap_db, id, telefoneFormatado);
+    
+    // Notifica clientes SSE sobre atualização
+    notificarClientesSSE(telefoneFormatado, 'categoria-removida', {
+      id,
+      tipo: 'categoria',
+      mensagem: 'Categoria removida'
+    }, c.env.financezap_db);
     
     return c.json({ success: true, message: 'Categoria removida com sucesso' });
   } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ========== SERVER-SENT EVENTS (SSE) ==========
+
+// Rota SSE para atualizações em tempo real
+app.get('/api/events', async (c) => {
+  try {
+    // Autenticação obrigatória
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    console.log(`📡 Cliente SSE conectado: ${telefoneFormatado}`);
+    
+    // Cria stream SSE
+    let streamController: ReadableStreamDefaultController | null = null;
+    const telefoneSemPrefixo = telefoneFormatado.replace('whatsapp:', '').replace(/^\+/, '');
+    
+    // Gera TODAS as variações possíveis do telefone (incluindo com/sem o 9)
+    const telefonesParaAdicionar = telefoneVariacoes(telefoneFormatado);
+    console.log(`📡 SSE: Registrando cliente para ${telefonesParaAdicionar.length} variações:`, telefonesParaAdicionar);
+    
+    // Adiciona variações com/sem o dígito 9 (para números brasileiros)
+    if (telefoneSemPrefixo.startsWith('55') && telefoneSemPrefixo.length === 13) {
+      // Número com 9 dígitos: remove o 9
+      const sem9 = telefoneSemPrefixo.substring(0, 4) + telefoneSemPrefixo.substring(5);
+      telefonesParaAdicionar.push(sem9, `+${sem9}`, `whatsapp:+${sem9}`, `whatsapp:${sem9}`);
+    } else if (telefoneSemPrefixo.startsWith('55') && telefoneSemPrefixo.length === 12) {
+      // Número sem 9 dígitos: adiciona o 9
+      const com9 = telefoneSemPrefixo.substring(0, 4) + '9' + telefoneSemPrefixo.substring(4);
+      telefonesParaAdicionar.push(com9, `+${com9}`, `whatsapp:+${com9}`, `whatsapp:${com9}`);
+    }
+    
+    const stream = new ReadableStream({
+      start(controller) {
+        streamController = controller;
+        
+        // Adiciona cliente à lista
+        telefonesParaAdicionar.forEach(tel => {
+          if (!clientesSSE.has(tel)) {
+            clientesSSE.set(tel, []);
+          }
+          clientesSSE.get(tel)!.push(controller);
+          console.log(`📡 SSE: Cliente adicionado para telefone: ${tel} (total: ${clientesSSE.get(tel)!.length})`);
+        });
+        
+        console.log(`📡 SSE: Clientes SSE ativos:`, Array.from(clientesSSE.keys()));
+        
+        // Envia mensagem de conexão
+        const mensagemInicial = `event: connected\ndata: ${JSON.stringify({ message: 'Conectado' })}\n\n`;
+        controller.enqueue(new TextEncoder().encode(mensagemInicial));
+        
+        // Keep-alive: envia ping periodicamente para manter conexão viva
+        // Usa uma função recursiva com setTimeout (compatível com Cloudflare Workers)
+        const enviarKeepAlive = () => {
+          try {
+            const ping = `: ping\n\n`;
+            controller.enqueue(new TextEncoder().encode(ping));
+            console.log(`💓 SSE: Keep-alive ping enviado para ${telefoneFormatado}`);
+            
+            // Agenda próximo ping em 30 segundos
+            setTimeout(() => {
+              if (streamController === controller) {
+                enviarKeepAlive();
+              }
+            }, 30000);
+          } catch (error) {
+            console.error('❌ Erro ao enviar keep-alive:', error);
+          }
+        };
+        
+        // Inicia keep-alive após 30 segundos
+        setTimeout(() => {
+          if (streamController === controller) {
+            enviarKeepAlive();
+          }
+        }, 30000);
+        
+        // Limpa conexão quando o cliente desconecta
+        const limparConexao = () => {
+          streamController = null; // Marca como desconectado
+          telefonesParaAdicionar.forEach(tel => {
+            const clientes = clientesSSE.get(tel);
+            if (clientes) {
+              const index = clientes.indexOf(controller);
+              if (index > -1) {
+                clientes.splice(index, 1);
+              }
+              if (clientes.length === 0) {
+                clientesSSE.delete(tel);
+              }
+            }
+          });
+          console.log(`📡 Cliente SSE desconectado: ${telefoneFormatado}`);
+        };
+        
+        // Detecta desconexão
+        c.req.raw.signal?.addEventListener('abort', limparConexao);
+      },
+      cancel() {
+        // Marca como desconectado
+        streamController = null;
+        // Remove cliente quando conexão é cancelada
+        if (streamController) {
+          telefonesParaAdicionar.forEach(tel => {
+            const clientes = clientesSSE.get(tel);
+            if (clientes) {
+              const index = clientes.indexOf(streamController!);
+              if (index > -1) {
+                clientes.splice(index, 1);
+              }
+              if (clientes.length === 0) {
+                clientesSSE.delete(tel);
+              }
+            }
+          });
+        }
+        console.log(`📡 Cliente SSE desconectado (cancel): ${telefoneFormatado}`);
+      }
+    });
+    
+    // Obtém a origem da requisição para CORS
+    const origin = c.req.header('Origin') || null;
+    const allowedOrigins = parseAllowedOrigins(c.env.ALLOWED_ORIGINS);
+    const allowedOrigin = isOriginAllowed(origin, allowedOrigins) ? (origin || '*') : (allowedOrigins[0] || '*');
+    
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': allowedOrigin,
+        'Access-Control-Allow-Headers': 'Authorization, Accept, Cache-Control',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Credentials': 'true',
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ Erro na conexão SSE:', error);
     return c.json({ success: false, error: error.message }, 500);
   }
 });
@@ -1438,7 +2213,7 @@ app.put('/api/agendamentos/:id', async (c) => {
     // Se marcou como pago, cria transação automaticamente
     if (status === 'pago') {
       const dataAtual = new Date().toISOString().split('T')[0];
-      await salvarTransacao(c.env.financezap_db, {
+      const transacaoId = await salvarTransacao(c.env.financezap_db, {
         telefone: telefoneFormatado,
         descricao: agendamento.descricao,
         valor: agendamento.valor,
@@ -1449,6 +2224,13 @@ app.put('/api/agendamentos/:id', async (c) => {
         data: dataAtual,
         mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`
       });
+      
+      // Notifica clientes SSE sobre nova transação
+      notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+        id: transacaoId,
+        tipo: 'transacao',
+        mensagem: 'Nova transação registrada'
+      }, c.env.financezap_db);
     }
     
     return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
@@ -1497,7 +2279,459 @@ app.delete('/api/agendamentos/:id', async (c) => {
   }
 });
 
+// ========== ENDPOINTS DE NOTIFICAÇÕES ==========
+
+// Buscar notificações não lidas
+app.get('/api/notificacoes', async (c) => {
+  try {
+    console.log('📬 GET /api/notificacoes - Iniciando...');
+    
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.warn('⚠️ Token não fornecido');
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+      console.log(`📞 Telefone extraído: ${telefoneFormatado}`);
+    } catch (error: any) {
+      console.error('❌ Erro ao extrair telefone do token:', error);
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    // Remove o prefixo whatsapp: para buscar no banco
+    const telefoneParaBusca = telefoneFormatado.replace('whatsapp:', '').replace('+', '');
+    console.log(`🔍 Buscando notificações para telefone: ${telefoneParaBusca}`);
+    
+    if (!c.env.financezap_db) {
+      console.error('❌ Database não disponível');
+      return c.json({ success: false, error: 'Database não disponível' }, 500);
+    }
+    
+    console.log('📊 Chamando buscarNotificacoesNaoLidasD1...');
+    const notificacoes = await buscarNotificacoesNaoLidasD1(c.env.financezap_db, telefoneParaBusca);
+    console.log(`✅ Notificações recebidas: ${Array.isArray(notificacoes) ? notificacoes.length : 'não é array'}`);
+    
+    if (!Array.isArray(notificacoes)) {
+      console.error('❌ Notificações não é um array:', typeof notificacoes, notificacoes);
+      return c.json({ success: false, error: 'Erro ao buscar notificações' }, 500);
+    }
+    
+    // Valida e processa notificações com tratamento de erro robusto
+    const notificacoesProcessadas = notificacoes
+      .filter(not => {
+        // Filtra notificações inválidas
+        if (!not || typeof not !== 'object') {
+          console.warn('⚠️ Notificação inválida filtrada:', not);
+          return false;
+        }
+        return true;
+      })
+      .map(not => {
+        try {
+          let dadosParsed = {};
+          try {
+            if (not.dados) {
+              dadosParsed = typeof not.dados === 'string' ? JSON.parse(not.dados) : (not.dados || {});
+            }
+          } catch (e) {
+            console.error('Erro ao fazer parse dos dados da notificação:', e);
+            dadosParsed = {};
+          }
+          
+          return {
+            id: not.id || null,
+            telefone: not.telefone || '',
+            tipo: not.tipo || '',
+            dados: dadosParsed,
+            lida: not.lida === 1,
+            criadoEm: not.criadoEm || new Date().toISOString(),
+          };
+        } catch (error: any) {
+          console.error('❌ Erro ao processar notificação individual:', error);
+          console.error('   Notificação:', JSON.stringify(not, null, 2));
+          return null;
+        }
+      })
+      .filter(not => not !== null);
+    
+    return c.json({
+      success: true,
+      notificacoes: notificacoesProcessadas
+    });
+  } catch (error: any) {
+    console.error('Erro em GET /api/notificacoes:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao buscar notificações' }, 500);
+  }
+});
+
+// Marcar notificações como lidas
+app.put('/api/notificacoes', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    let body: { ids?: number[] } = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      // Body vazio ou inválido - marcar todas
+    }
+    const ids = body.ids; // Array opcional de IDs para marcar específicas
+    
+    // Remove o prefixo whatsapp: para buscar no banco
+    const telefoneParaBusca = telefoneFormatado.replace('whatsapp:', '').replace('+', '');
+    
+    const marcadas = await marcarNotificacoesComoLidasD1(
+      c.env.financezap_db,
+      telefoneParaBusca,
+      Array.isArray(ids) ? ids : undefined
+    );
+    
+    return c.json({
+      success: true,
+      marcadas,
+      message: `${marcadas} notificação(ões) marcada(s) como lida(s)`
+    });
+  } catch (error: any) {
+    console.error('Erro em PUT /api/notificacoes:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao marcar notificações como lidas' }, 500);
+  }
+});
+
 // Webhook Z-API (versão simplificada para Worker)
+// Rota para chat de IA
+app.post('/api/chat', autenticarMiddleware, async (c) => {
+  try {
+    const body = await c.req.json();
+    const { mensagem } = body;
+    
+    if (!mensagem || !mensagem.trim()) {
+      return c.json({ success: false, error: 'Mensagem é obrigatória' }, 400);
+    }
+    
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    console.log('💬 Chat de IA - Mensagem recebida:', mensagem);
+    console.log('   Telefone:', telefoneFormatado);
+    
+    // Busca estatísticas e transações do usuário para contexto
+    const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: telefoneFormatado });
+    const transacoesData = await buscarTransacoes(c.env.financezap_db, {
+      telefone: telefoneFormatado,
+      limit: 10,
+      offset: 0
+    });
+    
+    // Prepara o contexto financeiro
+    const estatisticasTexto = `
+- Total gasto: R$ ${estatisticas.totalSaidas?.toFixed(2) || '0.00'}
+- Total de transações: ${estatisticas.totalTransacoes || 0}
+- Média por transação: R$ ${estatisticas.mediaGasto?.toFixed(2) || '0.00'}
+- Maior gasto: R$ ${estatisticas.maiorGasto?.toFixed(2) || '0.00'}
+- Menor gasto: R$ ${estatisticas.menorGasto?.toFixed(2) || '0.00'}
+- Gasto hoje: R$ ${estatisticas.gastoHoje?.toFixed(2) || '0.00'}
+- Gasto do mês: R$ ${estatisticas.gastoMes?.toFixed(2) || '0.00'}
+    `.trim();
+
+    const transacoesTexto = transacoesData.transacoes.slice(0, 10).map((t: any) => 
+      `- ${t.descricao}: R$ ${t.valor.toFixed(2)} (${t.categoria})`
+    ).join('\n');
+
+    const promptCompleto = `Você é um assistente inteligente do Zela, uma plataforma completa de gestão financeira pessoal via WhatsApp e portal web.
+
+SUAS FUNÇÕES PRINCIPAIS:
+1. Consultor financeiro pessoal - Analisar finanças e dar conselhos práticos
+2. Suporte da plataforma - Responder dúvidas sobre como usar o Zela
+3. Instrutor - Ensinar formas legais e eficientes de usar a plataforma
+
+═══════════════════════════════════════════════════════════
+📱 COMO USAR O ZELA VIA WHATSAPP
+═══════════════════════════════════════════════════════════
+
+1. 📝 REGISTRO DE TRANSAÇÕES VIA WHATSAPP
+   - A IA extrai automaticamente: descrição, valor, categoria, tipo (entrada/saída) e método de pagamento
+   - Suporta múltiplas transações em uma única mensagem
+   - Aceita mensagens de texto ou áudio (transcrição automática)
+   
+   📱 EXEMPLOS DE MENSAGENS QUE O USUÁRIO PODE ENVIAR:
+   
+   💸 GASTOS (SAÍDAS):
+   - "comprei um sanduíche por 20 reais"
+   - "gastei 50 reais com gasolina"
+   - "paguei 150 reais de conta de luz"
+   - "comprei café por 5 reais e pão por 8 reais"
+   - "gastei 30 reais no almoço e 15 no estacionamento"
+   - "paguei 200 reais de internet no cartão de crédito"
+   - "comprei remédio por 45 reais na farmácia"
+   - "gastei 80 reais com uber hoje"
+   
+   💰 RECEITAS (ENTRADAS):
+   - "recebi 500 reais do cliente"
+   - "me pagaram 2000 reais de salário"
+   - "recebi 300 reais de venda"
+   - "o chefe acabou de me pagar 1500 reais"
+   - "recebi pagamento de 800 reais"
+   - "depositei 500 reais na conta"
+   
+   🎯 MÚLTIPLAS TRANSAÇÕES:
+   - "comprei pão por 5 reais, leite por 8 e café por 12"
+   - "gastei 50 com gasolina, 30 com almoço e 20 com estacionamento"
+   - "recebi 1000 do cliente e paguei 200 de conta"
+   
+   💬 MENSAGENS DE ÁUDIO:
+   - O usuário pode enviar áudios descrevendo suas transações
+   - Exemplo: gravar "gastei 50 reais com gasolina e 30 com almoço"
+   - A transcrição automática converte para texto
+
+2. 📅 AGENDAMENTOS VIA WHATSAPP
+   - Agende pagamentos e recebimentos futuros enviando mensagens
+   - Receba notificações quando chegar a data
+   - Visualize agendamentos pendentes, pagos e cancelados no portal
+   
+   📱 EXEMPLOS DE MENSAGENS PARA AGENDAR:
+   - "tenho que pagar 300 reais de aluguel no dia 5"
+   - "preciso pagar 200 de internet no dia 10"
+   - "vou receber 1500 de salário no dia 1"
+   - "tenho que pagar 500 de faculdade no dia 15"
+   - "agende pagamento de 800 reais de aluguel para o dia 5"
+   - "vou receber 2000 reais no dia 20"
+
+3. 📊 VISUALIZAÇÃO E ANÁLISE (PORTAL WEB)
+   - Dashboard com estatísticas em tempo real
+   - Gráficos de gastos por dia, mês e categoria
+   - Métricas: Total gasto, média por transação, maior/menor gasto
+   - Filtros por data, categoria, tipo e método de pagamento
+
+4. 💬 CHAT DE IA FINANCEIRA
+   - Faça perguntas sobre suas finanças
+   - Receba conselhos personalizados baseados nos seus dados
+   - Sugestões de economia e planejamento financeiro
+
+5. 🏷️ CATEGORIZAÇÃO AUTOMÁTICA
+   - Categorias comuns: comida, transporte, lazer, saúde, educação, moradia, roupas, tecnologia, serviços, outros
+   - A IA categoriza automaticamente baseado na descrição
+
+═══════════════════════════════════════════════════════════
+💡 DICAS DE USO
+═══════════════════════════════════════════════════════════
+
+1. REGISTRE TUDO RAPIDAMENTE VIA WHATSAPP
+   - Envie mensagens logo após fazer uma compra ou receber um pagamento
+   - Use frases naturais e simples - a IA entende perfeitamente
+   - Exemplos que funcionam:
+     ✅ "comprei café por 5 reais"
+     ✅ "gastei 50 conto com gasolina"
+     ✅ "recebi 500 pila do cliente"
+     ✅ "paguei 150 de luz"
+   - Não precisa ser formal, escreva como você fala!
+
+2. USE ÁUDIO PARA SER MAIS RÁPIDO
+   - Grave um áudio enquanto está na fila ou no trânsito
+   - Exemplo: "Gastei 50 reais com gasolina e 30 com estacionamento"
+   - A transcrição automática converte para texto
+
+3. REGISTRE MÚLTIPLAS TRANSAÇÕES DE UMA VEZ
+   - "Comprei pão por 5 reais, leite por 8 e café por 12"
+   - A IA extrai todas as transações automaticamente
+
+4. USE AGENDAMENTOS PARA PLANEJAR
+   - Agende contas fixas no início do mês
+   - Exemplo: "Tenho que pagar 800 de aluguel no dia 5 e 200 de internet no dia 10"
+   - Receba lembretes automáticos
+
+═══════════════════════════════════════════════════════════
+📋 EXEMPLOS DE PERGUNTAS QUE VOCÊ PODE RESPONDER
+═══════════════════════════════════════════════════════════
+
+SOBRE FINANÇAS:
+- "Como posso economizar mais dinheiro?"
+- "Quanto estou gastando por mês?"
+- "Qual minha maior categoria de gastos?"
+- "Como criar um orçamento?"
+
+SOBRE A PLATAFORMA:
+- "Como registro uma transação?" → ⚠️ Envie mensagens diretamente no WhatsApp do Zela! Exemplo: "comprei X por Y reais"
+- "Como funciona o agendamento?" → ⚠️ Envie mensagens diretamente no WhatsApp do Zela! Exemplo: "tenho que pagar X no dia Y"
+- "Como usar o chat de IA?" → Você está usando agora! Faça perguntas sobre suas finanças
+- "Quais categorias existem?" → comida, transporte, lazer, saúde, educação, moradia, roupas, tecnologia, serviços, outros
+- "Como editar meu perfil?" → Acesse Configurações no portal web
+- "Como salvar o contato do WhatsApp?" → Vá em Configurações > Salvar Contato no portal web
+- "Como visualizar meus gastos?" → Acesse o Dashboard no portal web para ver gráficos e relatórios
+
+⚠️ LEMBRE-SE: Para registrar transações e agendamentos, você DEVE enviar mensagens diretamente no WhatsApp do Zela, não no portal web!
+
+═══════════════════════════════════════════════════════════
+🎯 INSTRUÇÕES DE RESPOSTA
+═══════════════════════════════════════════════════════════
+
+Quando o usuário perguntar sobre:
+- FINANÇAS: Use os dados financeiros fornecidos e dê conselhos práticos
+- PLATAFORMA: Explique como usar as funcionalidades do Zela de forma clara e passo a passo, SEMPRE incluindo exemplos práticos de mensagens que podem ser enviadas
+- COMO FAZER ALGO: Dê instruções detalhadas e exemplos práticos de mensagens
+
+Sempre seja:
+- Empático e encorajador
+- Prático e objetivo
+- Focado em soluções
+- Claro nas explicações
+- Use emojis quando apropriado para tornar a resposta mais amigável
+- SEMPRE dê exemplos práticos de mensagens que o usuário pode enviar
+
+Dados financeiros do usuário:
+${estatisticasTexto}
+
+Histórico de transações recentes:
+${transacoesTexto || 'Nenhuma transação recente'}
+
+Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre finanças, use os dados fornecidos. Se for sobre a plataforma, explique como usar as funcionalidades do Zela e SEMPRE inclua exemplos práticos de mensagens que podem ser enviadas via WhatsApp.`;
+
+    // Verifica qual IA está disponível
+    const temGroq = c.env.GROQ_API_KEY && c.env.GROQ_API_KEY.trim() !== '';
+    const temGemini = c.env.GEMINI_API_KEY && c.env.GEMINI_API_KEY.trim() !== '';
+    const IA_PROVIDER = (c.env.IA_PROVIDER || '').toLowerCase().trim();
+
+    if (!temGroq && !temGemini) {
+      return c.json({ 
+        success: false, 
+        error: 'Nenhuma API de IA configurada. Configure GROQ_API_KEY ou GEMINI_API_KEY no Cloudflare Workers.' 
+      }, 500);
+    }
+
+    let resposta: string;
+
+    // Tenta usar Groq primeiro (se configurado)
+    if ((IA_PROVIDER === 'groq' || !IA_PROVIDER) && temGroq) {
+      try {
+        console.log('🤖 Chat IA - Usando Groq');
+        const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${c.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'llama-3.1-8b-instant',
+            messages: [
+              { role: 'system', content: promptCompleto },
+              { role: 'user', content: mensagem }
+            ],
+            temperature: 0.7,
+            max_tokens: 1000
+          }),
+        });
+
+        if (!groqResponse.ok) {
+          throw new Error(`Groq API error: ${groqResponse.status}`);
+        }
+
+        const groqData = await groqResponse.json();
+        resposta = groqData.choices[0]?.message?.content || 'Desculpe, não consegui processar sua mensagem.';
+      } catch (error: any) {
+        console.warn('⚠️  Erro ao usar Groq, tentando Gemini...', error.message);
+        if (temGemini) {
+          // Fallback para Gemini
+          try {
+            console.log('🤖 Chat IA - Usando Gemini (fallback)');
+            const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{
+                  parts: [{ text: `${promptCompleto}\n\nPergunta do usuário: ${mensagem}` }]
+                }]
+              }),
+            });
+
+            if (!geminiResponse.ok) {
+              throw new Error(`Gemini API error: ${geminiResponse.status}`);
+            }
+
+            const geminiData = await geminiResponse.json();
+            resposta = geminiData.candidates[0]?.content?.parts[0]?.text || 'Desculpe, não consegui processar sua mensagem.';
+          } catch (geminiError: any) {
+            throw new Error(`Erro ao processar com ambas as IAs: ${error.message}`);
+          }
+        } else {
+          throw error;
+        }
+      }
+    } else if (temGemini) {
+      // Usa Gemini diretamente
+      try {
+        console.log('🤖 Chat IA - Usando Gemini');
+        const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{ text: `${promptCompleto}\n\nPergunta do usuário: ${mensagem}` }]
+            }]
+          }),
+        });
+
+        if (!geminiResponse.ok) {
+          throw new Error(`Gemini API error: ${geminiResponse.status}`);
+        }
+
+        const geminiData = await geminiResponse.json();
+        resposta = geminiData.candidates[0]?.content?.parts[0]?.text || 'Desculpe, não consegui processar sua mensagem.';
+      } catch (error: any) {
+        console.error('❌ Erro ao processar com Gemini:', error);
+        throw error;
+      }
+    } else {
+      throw new Error('Nenhuma IA disponível');
+    }
+
+    console.log('✅ Chat de IA - Resposta gerada');
+    
+    return c.json({
+      success: true,
+      resposta
+    });
+  } catch (error: any) {
+    console.error('❌ Erro no chat de IA:', error);
+    return c.json({
+      success: false,
+      error: error.message || 'Erro ao processar mensagem'
+    }, 500);
+  }
+});
+
 app.post('/webhook/zapi', async (c) => {
   try {
     const body = await c.req.json();
@@ -1729,49 +2963,275 @@ app.post('/webhook/zapi', async (c) => {
       }
     }
     
-    // Se não foi agendamento, processa como transação
-    console.log('💰 Processando como transação...');
+    // Se não foi agendamento, processa como transação usando IA
+    console.log('💰 Processando como transação com IA...');
     
-    // Extrai valor simples da mensagem (versão básica)
-    const valorMatch = messageText.match(/(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/i);
-    const valor = valorMatch ? parseFloat(valorMatch[1].replace(',', '.')) : 0;
-    
-    // Salva transação básica - usa telefoneFormatado para garantir consistência
-    if (valor > 0) {
-      const dataHora = new Date().toISOString();
-      const data = dataHora.slice(0, 10);
+    try {
+      // Processa mensagem com IA para extrair transações
+      const transacoesExtraidas = await processarMensagemComIAWorker(messageText, c.env);
       
-      console.log('💾 Salvando transação:', {
-        telefone: telefoneFormatado,
-        valor,
-        descricao: messageText.substring(0, 50)
-      });
+      if (transacoesExtraidas && transacoesExtraidas.length > 0) {
+        console.log(`✅ ${transacoesExtraidas.length} transação(ões) extraída(s) pela IA`);
+        
+        const dataHora = new Date().toISOString();
+        const data = dataHora.slice(0, 10);
+        
+        let total = 0;
+        let resposta = '';
+        
+        // Salva cada transação extraída
+        let ultimoTransacaoId = 0;
+        for (const transacaoExtraida of transacoesExtraidas) {
+          // Garante que o tipo seja 'entrada' ou 'saida'
+          const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
+            ? 'entrada' 
+            : 'saida';
+          
+          console.log(`💾 Salvando transação extraída:`, {
+            descricao: transacaoExtraida.descricao,
+            valor: transacaoExtraida.valor,
+            categoria: transacaoExtraida.categoria,
+            tipo: tipoFinal,
+            metodo: transacaoExtraida.metodo || 'debito'
+          });
+          
+          const transacaoId = await salvarTransacao(c.env.financezap_db, {
+            telefone: telefoneFormatado,
+            descricao: transacaoExtraida.descricao || messageText.substring(0, 200),
+            valor: transacaoExtraida.valor,
+            categoria: transacaoExtraida.categoria || 'outros',
+            tipo: tipoFinal,
+            metodo: (transacaoExtraida.metodo && transacaoExtraida.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito',
+            dataHora,
+            data,
+            mensagemOriginal: messageText,
+          });
+          
+          ultimoTransacaoId = transacaoId; // Armazena o último ID para usar na resposta
+          
+          console.log(`✅ Transação salva com ID: ${transacaoId}`);
+          console.log(`📡 SSE: Transação criada, notificando clientes...`);
+          console.log(`📡 SSE: Telefone da transação: ${telefoneFormatado}`);
+          
+          const cleanFromNumber = telefoneFormatado.replace('whatsapp:', '');
+          
+          // Busca o telefone do usuário no banco para garantir correspondência
+          let telefoneParaNotificar = telefoneFormatado;
+          try {
+            const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, cleanFromNumber);
+            if (usuario && usuario.telefone) {
+              // Usa o telefone do banco (que é o formato correto usado no token JWT)
+              telefoneParaNotificar = usuario.telefone.startsWith('whatsapp:') 
+                ? usuario.telefone 
+                : `whatsapp:${usuario.telefone}`;
+              console.log(`📡 SSE: Telefone do usuário no banco: ${telefoneParaNotificar}`);
+            }
+          } catch (error) {
+            console.warn('⚠️ Erro ao buscar telefone do usuário:', error);
+          }
+          
+          // Notifica clientes SSE sobre nova transação (tenta com o telefone do banco e variações)
+          notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
+            id: transacaoId,
+            tipo: 'transacao',
+            mensagem: 'Nova transação registrada'
+          }, c.env.financezap_db);
+          
+          // Também tenta notificar com telefoneFormatado e cleanFromNumber (para garantir)
+          if (telefoneParaNotificar !== telefoneFormatado) {
+            notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+              id: transacaoId,
+              tipo: 'transacao',
+              mensagem: 'Nova transação registrada'
+            }, c.env.financezap_db);
+          }
+          
+          if (telefoneParaNotificar !== cleanFromNumber) {
+            notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
+              id: transacaoId,
+              tipo: 'transacao',
+              mensagem: 'Nova transação registrada'
+            }, c.env.financezap_db);
+          }
+          
+          // Calcula total
+          if (tipoFinal === 'entrada') {
+            total += transacaoExtraida.valor;
+          } else {
+            total -= transacaoExtraida.valor;
+          }
+        }
+        
+        // Função para gerar identificador único (ex: AQTXU)
+        const gerarIdentificador = (id: number): string => {
+          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+          let resultado = '';
+          let num = id;
+          for (let i = 0; i < 5; i++) {
+            resultado += chars[num % chars.length];
+            num = Math.floor(num / chars.length);
+          }
+          return resultado.split('').reverse().join('');
+        };
+        
+        // Prepara resposta detalhada e completa
+        if (transacoesExtraidas.length === 1) {
+          const t = transacoesExtraidas[0];
+          const tipoFinal = (t.tipo && t.tipo.toLowerCase().trim() === 'entrada') ? 'entrada' : 'saida';
+          const identificador = gerarIdentificador(ultimoTransacaoId);
+          const dataFormatada = new Date(dataHora).toLocaleDateString('pt-BR');
+          const tipoEmoji = tipoFinal === 'entrada' ? '💰' : '🔴';
+          const tipoTexto = tipoFinal === 'entrada' ? 'Receita' : 'Despesa';
+          
+          resposta = `*Transação registrada com sucesso!*\n\n`;
+          resposta += `*Identificador:* ${identificador}\n\n`;
+          resposta += `*Resumo da transação:*\n`;
+          resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
+          resposta += `📄 *Descrição:* ${t.descricao}\n`;
+          resposta += `💰 *Valor:* R$ ${t.valor.toFixed(2).replace('.', ',')}\n`;
+          resposta += `🔄 *Tipo:* ${tipoEmoji} ${tipoTexto}\n`;
+          resposta += `🏷️ *Categoria:* ${t.categoria}\n`;
+          resposta += `📋 *Subcategoria:* —\n`;
+          resposta += `🏦 *Conta:* —\n`;
+          resposta += `📅 *Data:* ${dataFormatada}\n`;
+          resposta += `💵 *Pago:* ✔\n`;
+          resposta += `📌 *Despesa fixa:* ✗ (Variável)\n\n`;
+          resposta += `❌ *Para excluir diga:* "Excluir transação ${identificador}"\n\n`;
+          resposta += `📊 *Consulte gráficos e relatórios completos em:*\n`;
+          resposta += `usezela.com/painel\n\n`;
+          resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
+          resposta += `⚡ *Ações rápidas*\n`;
+          resposta += `• Ver resumo financeiro do mês\n`;
+          resposta += `• Excluir esta transação`;
+        } else {
+          resposta = `✅ *${transacoesExtraidas.length} transações registradas!*\n\n`;
+          transacoesExtraidas.forEach((t, index) => {
+            const tipoFinal = (t.tipo && t.tipo.toLowerCase().trim() === 'entrada') ? 'entrada' : 'saida';
+            const tipoEmoji = tipoFinal === 'entrada' ? '💰' : '🔴';
+            resposta += `${index + 1}. ${t.descricao} - R$ ${t.valor.toFixed(2).replace('.', ',')} (${t.categoria}) - ${tipoEmoji} ${tipoFinal === 'entrada' ? 'Receita' : 'Despesa'}\n`;
+          });
+          resposta += `\n📊 *Consulte gráficos e relatórios completos em:*\n`;
+          resposta += `usezela.com/painel`;
+        }
+        
+        await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+        console.log('✅ Confirmação enviada para:', telefoneFormatado);
+      } else {
+        console.log('⚠️ Nenhuma transação financeira encontrada na mensagem');
+        // Não envia resposta se não encontrar transação (evita spam)
+      }
+    } catch (error: any) {
+      console.error('❌ Erro ao processar mensagem com IA:', error.message);
+      // Fallback: tenta salvar como transação básica se a IA falhar
+      const valorMatch = messageText.match(/(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/i);
+      const valor = valorMatch ? parseFloat(valorMatch[1].replace(',', '.')) : 0;
       
-      try {
+      if (valor > 0) {
+        console.log('⚠️ Usando fallback: salvando transação básica');
+        const dataHora = new Date().toISOString();
+        const data = dataHora.slice(0, 10);
+        
+        // Detecta se é entrada ou saída baseado em palavras-chave
+        const mensagemLower = messageText.toLowerCase();
+        const palavrasEntrada = ['recebi', 'recebido', 'ganhei', 'vendi', 'salário', 'salario', 'me pagou', 'me pagaram'];
+        const tipo = palavrasEntrada.some(p => mensagemLower.includes(p)) ? 'entrada' : 'saida';
+        
         const transacaoId = await salvarTransacao(c.env.financezap_db, {
           telefone: telefoneFormatado,
           descricao: messageText.substring(0, 200),
           valor,
           categoria: 'outros',
-          tipo: 'saida',
+          tipo,
           metodo: 'debito',
           dataHora,
           data,
           mensagemOriginal: messageText,
         });
         
-        console.log('✅ Transação salva com sucesso! ID:', transacaoId);
+        console.log(`📡 SSE: Transação criada com ID ${transacaoId}, notificando clientes...`);
+        console.log(`📡 SSE: Telefone da transação: ${telefoneFormatado}`);
+        console.log(`📡 SSE: cleanFromNumber: ${cleanFromNumber}`);
         
-        // Envia confirmação
-        const resposta = `✅ Transação registrada!\n\n📝 ${messageText.substring(0, 50)}\n💰 R$ ${valor.toFixed(2)}`;
+        // Busca o telefone do usuário no banco para garantir correspondência
+        let telefoneParaNotificar = telefoneFormatado;
+        try {
+          const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, cleanFromNumber);
+          if (usuario && usuario.telefone) {
+            // Usa o telefone do banco (que é o formato correto usado no token JWT)
+            telefoneParaNotificar = usuario.telefone.startsWith('whatsapp:') 
+              ? usuario.telefone 
+              : `whatsapp:${usuario.telefone}`;
+            console.log(`📡 SSE: Telefone do usuário no banco: ${telefoneParaNotificar}`);
+          }
+        } catch (error) {
+          console.warn('⚠️ Erro ao buscar telefone do usuário:', error);
+        }
+        
+        // Notifica clientes SSE sobre nova transação
+        // Tenta com ambos os formatos: telefoneFormatado e cleanFromNumber
+        notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
+          id: transacaoId,
+          tipo: 'transacao',
+          mensagem: 'Nova transação registrada'
+        }, c.env.financezap_db);
+        
+        if (telefoneParaNotificar !== telefoneFormatado) {
+          notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+            id: transacaoId,
+            tipo: 'transacao',
+            mensagem: 'Nova transação registrada'
+          }, c.env.financezap_db);
+        }
+        
+        // Também tenta notificar com cleanFromNumber (sem whatsapp:)
+        notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
+          id: transacaoId,
+          tipo: 'transacao',
+          mensagem: 'Nova transação registrada'
+        }, c.env.financezap_db);
+        
+        // Função para gerar identificador único (ex: AQTXU)
+        const gerarIdentificador = (id: number): string => {
+          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+          let resultado = '';
+          let num = id;
+          for (let i = 0; i < 5; i++) {
+            resultado += chars[num % chars.length];
+            num = Math.floor(num / chars.length);
+          }
+          return resultado.split('').reverse().join('');
+        };
+        
+        // Prepara resposta completa (mesmo formato da resposta principal)
+        const identificador = gerarIdentificador(transacaoId);
+        const dataFormatada = new Date(dataHora).toLocaleDateString('pt-BR');
+        const tipoTexto = tipo === 'entrada' ? 'Receita' : 'Despesa';
+        const tipoEmoji = tipo === 'entrada' ? '💰' : '🔴';
+        const descricaoCompleta = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
+        
+        let resposta = `*Transação registrada com sucesso!*\n\n`;
+        resposta += `*Identificador:* ${identificador}\n\n`;
+        resposta += `*Resumo da transação:*\n`;
+        resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
+        resposta += `📄 *Descrição:* ${descricaoCompleta}\n`;
+        resposta += `💰 *Valor:* R$ ${valor.toFixed(2).replace('.', ',')}\n`;
+        resposta += `🔄 *Tipo:* ${tipoEmoji} ${tipoTexto}\n`;
+        resposta += `🏷️ *Categoria:* outros\n`;
+        resposta += `📋 *Subcategoria:* —\n`;
+        resposta += `🏦 *Conta:* —\n`;
+        resposta += `📅 *Data:* ${dataFormatada}\n`;
+        resposta += `💵 *Pago:* ✔\n`;
+        resposta += `📌 *Despesa fixa:* ✗ (Variável)\n\n`;
+        resposta += `❌ *Para excluir diga:* "Excluir transação ${identificador}"\n\n`;
+        resposta += `📊 *Consulte gráficos e relatórios completos em:*\n`;
+        resposta += `usezela.com/painel\n\n`;
+        resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
+        resposta += `⚡ *Ações rápidas*\n`;
+        resposta += `• Ver resumo financeiro do mês\n`;
+        resposta += `• Excluir esta transação`;
+        
         await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
-        console.log('✅ Confirmação enviada para:', telefoneFormatado);
-      } catch (error: any) {
-        console.error('❌ Erro ao salvar transação:', error);
-        throw error;
       }
-    } else {
-      console.log('⚠️ Valor não encontrado na mensagem ou valor é 0');
     }
     
     return c.json({ success: true, message: 'Mensagem processada' });

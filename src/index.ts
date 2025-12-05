@@ -173,9 +173,33 @@ app.use(express.json({ limit: '10mb' }));
 
 // CORS - Configuração de segurança
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173', 'http://localhost:3000'];
+
+// Função para verificar se uma origem é permitida (suporta wildcards)
+function isOriginAllowed(origin: string, allowedOrigins: string[]): boolean {
+  if (!origin) return false;
+  
+  // Verifica correspondência exata
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+  
+  // Verifica wildcards (ex: *.pages.dev)
+  for (const allowed of allowedOrigins) {
+    if (allowed.includes('*')) {
+      const pattern = allowed.replace(/\*/g, '.*');
+      const regex = new RegExp(`^${pattern}$`);
+      if (regex.test(origin)) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && isOriginAllowed(origin, allowedOrigins)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -188,20 +212,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS para permitir requisições do frontend
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  // Responde ao preflight request
-  if (req.method === 'OPTIONS') {
-    console.log('🔄 Preflight request recebido, enviando headers CORS...');
-    return res.sendStatus(200);
-  }
-  
-  next();
-});
+// Middleware CORS removido - já configurado acima com segurança
 
 // Servir arquivos estáticos (para a interface web antiga - manter compatibilidade)
 app.use(express.static(path.join(process.cwd(), 'public')));
@@ -2500,10 +2511,15 @@ app.get('/api/mensagens/stream', (req, res) => {
   console.log('🔌 Cliente SSE conectado');
   
   // Configura headers para SSE
+  // Verifica origem para SSE também
+  const origin = req.headers.origin;
+  if (origin && isOriginAllowed(origin, allowedOrigins)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('X-Accel-Buffering', 'no'); // Desabilita buffering do nginx
   
   // Envia um ping inicial para manter a conexão viva

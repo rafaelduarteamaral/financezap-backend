@@ -140,6 +140,7 @@ export function limparCodigosExpirados(): void {
   }
 }
 
-// Limpa códigos expirados a cada 5 minutos
-setInterval(limparCodigosExpirados, 5 * 60 * 1000);
+// Limpa códigos expirados quando necessário (chamado manualmente)
+// Nota: setInterval não funciona no Cloudflare Workers, então limpamos sob demanda
+// A limpeza acontece automaticamente quando verificamos códigos
 

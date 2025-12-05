@@ -1,5 +1,14 @@
 // Utilidades para acessar o D1 no Cloudflare Workers (substitui Prisma no Worker)
 
+export interface NotificacaoRecord {
+  id?: number;
+  telefone: string;
+  tipo: string; // 'transacao-nova', 'categoria-removida', etc.
+  dados: string; // JSON string
+  lida: number; // 0 = não lida, 1 = lida
+  criadoEm: string;
+}
+
 export interface TransacaoRecord {
   id?: number;
   telefone: string;
@@ -34,13 +43,72 @@ function normalizarTelefone(telefone: string): string {
   return telefone.replace('whatsapp:', '').trim();
 }
 
+// Função para criar variações de números brasileiros com dígito 9 opcional
+function criarVariacoesDigito9(numero: string): string[] {
+  const variacoes: string[] = [numero];
+  
+  // Remove caracteres não numéricos
+  const apenasNumeros = numero.replace(/\D/g, '');
+  
+  // Se começa com 55 (código do Brasil)
+  if (apenasNumeros.startsWith('55')) {
+    const resto = apenasNumeros.substring(2); // Remove o 55
+    
+    // Se tem mais de 10 dígitos após o 55, pode ter o 9 opcional
+    if (resto.length >= 10) {
+      // Tenta adicionar/remover o 9 após o DDD (após os 2 primeiros dígitos do resto)
+      const ddd = resto.substring(0, 2);
+      const numeroSemDDD = resto.substring(2);
+      
+      // Se o número começa com 9, cria variação sem o 9
+      if (numeroSemDDD.startsWith('9') && numeroSemDDD.length === 9) {
+        const sem9 = `55${ddd}${numeroSemDDD.substring(1)}`;
+        variacoes.push(sem9);
+        variacoes.push(`+${sem9}`);
+        variacoes.push(`whatsapp:+${sem9}`);
+      }
+      
+      // Se o número não começa com 9 mas tem 8 dígitos, cria variação com 9
+      if (!numeroSemDDD.startsWith('9') && numeroSemDDD.length === 8) {
+        const com9 = `55${ddd}9${numeroSemDDD}`;
+        variacoes.push(com9);
+        variacoes.push(`+${com9}`);
+        variacoes.push(`whatsapp:+${com9}`);
+      }
+    }
+  }
+  
+  return variacoes;
+}
+
 function telefoneVariacoes(telefone: string): string[] {
   const limpo = normalizarTelefone(telefone);
   const semMais = limpo.replace(/^\+/, '');
   const comMais = `+${semMais}`;
   const comPrefixoWhats = `whatsapp:${comMais}`;
-
-  return [limpo, semMais, comMais, comPrefixoWhats].filter(Boolean);
+  const semPrefixoComMais = limpo; // Mantém o formato original normalizado
+  
+  // Cria variações básicas
+  const variacoesBasicas = [
+    limpo,           // +556181474690
+    semMais,         // 556181474690
+    comMais,         // +556181474690
+    comPrefixoWhats, // whatsapp:+556181474690
+  ];
+  
+  // Cria variações com/sem dígito 9 opcional (para números brasileiros)
+  const variacoesDigito9 = criarVariacoesDigito9(semMais);
+  
+  // Combina todas as variações
+  const todasVariacoes = [
+    ...variacoesBasicas,
+    ...variacoesDigito9,
+    semPrefixoComMais
+  ];
+  
+  const unicas = [...new Set(todasVariacoes)].filter(Boolean);
+  console.log('🔍 telefoneVariacoes para', telefone, '->', unicas.length, 'variações');
+  return unicas;
 }
 
 function montarWhere(filtros: {
@@ -57,9 +125,24 @@ function montarWhere(filtros: {
 
   if (filtros.telefone) {
     const variacoes = telefoneVariacoes(filtros.telefone);
-    const placeholders = variacoes.map(() => 'telefone = ?').join(' OR ');
+    console.log('🔍 Montando WHERE com variações:', variacoes);
+    
+    // Também cria variações normalizadas (sem whatsapp: e sem +)
+    const variacoesNormalizadas = variacoes.map(v => normalizarTelefone(v));
+    const todasVariacoes = [...new Set([...variacoes, ...variacoesNormalizadas])];
+    console.log('🔍 Todas as variações (incluindo normalizadas):', todasVariacoes);
+    console.log('🔍 Quantidade de variações:', todasVariacoes.length);
+    
+    if (todasVariacoes.length === 0) {
+      console.warn('⚠️ Nenhuma variação criada para o telefone:', filtros.telefone);
+    }
+    
+    const placeholders = todasVariacoes.map(() => 'telefone = ?').join(' OR ');
     where.push(`(${placeholders})`);
-    params.push(...variacoes);
+    params.push(...todasVariacoes);
+    
+    console.log('🔍 SQL WHERE clause gerado:', `(${placeholders})`);
+    console.log('🔍 SQL params:', params.slice(0, 10)); // Mostra apenas os primeiros 10 params
   }
 
   if (filtros.dataInicio) {
@@ -103,6 +186,9 @@ export async function salvarTransacao(
   const agora = new Date();
   const dataHora = transacao.dataHora || agora.toISOString();
   const data = transacao.data || dataHora.slice(0, 10);
+  
+  const telefoneNormalizado = normalizarTelefone(transacao.telefone);
+  console.log('💾 D1: Salvando transação com telefone normalizado:', telefoneNormalizado);
 
   const result = await db
     .prepare(
@@ -111,7 +197,7 @@ export async function salvarTransacao(
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
-      normalizarTelefone(transacao.telefone),
+      telefoneNormalizado,
       transacao.descricao,
       transacao.valor,
       transacao.categoria || 'outros',
@@ -123,7 +209,9 @@ export async function salvarTransacao(
     )
     .run();
 
-  return Number(result.meta.last_row_id);
+  const id = Number(result.meta.last_row_id);
+  console.log('✅ D1: Transação salva com ID:', id, 'telefone:', telefoneNormalizado);
+  return id;
 }
 
 export async function buscarTransacoes(
@@ -140,15 +228,29 @@ export async function buscarTransacoes(
     offset?: number;
   }
 ): Promise<TransacoesResultado> {
+  // Log para debug
+  if (filtros.telefone) {
+    const variacoes = telefoneVariacoes(filtros.telefone);
+    console.log('🔍 Buscando transações com variações:', variacoes);
+  }
+  
   const { whereClause, params } = montarWhere(filtros);
   const limit = filtros.limit && filtros.limit > 0 ? Math.min(filtros.limit, 100) : 20;
   const offset = filtros.offset && filtros.offset > 0 ? filtros.offset : 0;
 
+  console.log('🔍 Executando COUNT com WHERE:', whereClause);
+  console.log('🔍 Parâmetros do COUNT:', params);
+  
   const totalRow = await db
     .prepare(`SELECT COUNT(*) as total FROM transacoes ${whereClause}`)
     .bind(...params)
     .first<{ total: number }>();
+  
+  console.log('🔍 Resultado do COUNT:', totalRow?.total ?? 0);
 
+  console.log('🔍 Executando SELECT com WHERE:', whereClause);
+  console.log('🔍 Parâmetros do SELECT:', [...params, limit, offset]);
+  
   const rows = await db
     .prepare(
       `SELECT id, telefone, descricao, valor, categoria, tipo, metodo, dataHora, data, mensagemOriginal 
@@ -158,6 +260,11 @@ export async function buscarTransacoes(
     )
     .bind(...params, limit, offset)
     .all<TransacaoRecord>();
+  
+  console.log('🔍 Resultado do SELECT:', {
+    quantidade: rows.results?.length ?? 0,
+    telefonesEncontrados: rows.results?.map(t => t.telefone).slice(0, 5) ?? []
+  });
 
   return {
     total: totalRow?.total ?? 0,
@@ -217,12 +324,12 @@ export async function calcularEstatisticas(
   const gastoHojeRow = await db
     .prepare(
       `SELECT 
-        SUM(CASE WHEN tipo = 'saida' THEN valor ELSE 0 END) as gastoHoje,
+        SUM(CASE WHEN tipo = 'saida' THEN valor ELSE 0 END) as gastoHoje
       FROM transacoes
       ${whereClause ? `${whereClause} AND` : 'WHERE'} date(data) = date(?)`
     )
     .bind(...params, hojeIso)
-    .first<{ gastoHoje: number; filterMes: number }>();
+    .first<{ gastoHoje: number }>();
 
   const gastoMesRow = await db
     .prepare(
@@ -338,4 +445,693 @@ export async function registrarNumero(db: D1Database, telefone: string): Promise
 export async function removerTransacao(db: D1Database, id: number): Promise<boolean> {
   const result = await db.prepare('DELETE FROM transacoes WHERE id = ?').bind(id).run();
   return (result.meta.changes || 0) > 0;
+}
+
+// Funções de gerenciamento de usuários
+export async function buscarUsuarioPorTelefone(
+  db: D1Database,
+  telefone: string
+): Promise<{
+  id: number;
+  telefone: string;
+  nome: string;
+  email: string | null;
+  dataCadastro: string;
+  trialExpiraEm: string;
+  status: string;
+  assinaturaEm: string | null;
+  criadoEm: string;
+  atualizadoEm: string;
+} | null> {
+  const telefoneNormalizado = normalizarTelefone(telefone);
+  const variacoes = telefoneVariacoes(telefone);
+  
+  for (const variacao of variacoes) {
+    const result = await db
+      .prepare('SELECT * FROM usuarios WHERE telefone = ?')
+      .bind(variacao)
+      .first<{
+        id: number;
+        telefone: string;
+        nome: string;
+        email: string | null;
+        dataCadastro: string;
+        trialExpiraEm: string;
+        status: string;
+        assinaturaEm: string | null;
+        criadoEm: string;
+        atualizadoEm: string;
+      }>();
+    
+    if (result) return result;
+  }
+  
+  return null;
+}
+
+export async function criarUsuario(
+  db: D1Database,
+  dados: {
+    telefone: string;
+    nome: string;
+    email?: string | null;
+    trialExpiraEm: Date;
+  }
+): Promise<number> {
+  const telefoneNormalizado = normalizarTelefone(dados.telefone);
+  const variacoes = telefoneVariacoes(dados.telefone);
+  const preferida = variacoes[0];
+  
+  const result = await db
+    .prepare(
+      `INSERT INTO usuarios (telefone, nome, email, dataCadastro, trialExpiraEm, status, criadoEm, atualizadoEm)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, 'trial', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    )
+    .bind(
+      preferida,
+      dados.nome.trim(),
+      dados.email?.trim() || null,
+      dados.trialExpiraEm.toISOString()
+    )
+    .run();
+  
+  return Number(result.meta.last_row_id);
+}
+
+export async function atualizarUsuarioStatus(
+  db: D1Database,
+  telefone: string,
+  status: string
+): Promise<boolean> {
+  const telefoneNormalizado = normalizarTelefone(telefone);
+  const variacoes = telefoneVariacoes(telefone);
+  
+  for (const variacao of variacoes) {
+    const result = await db
+      .prepare('UPDATE usuarios SET status = ?, atualizadoEm = CURRENT_TIMESTAMP WHERE telefone = ?')
+      .bind(status, variacao)
+      .run();
+    
+    if ((result.meta.changes || 0) > 0) return true;
+  }
+  
+  return false;
+}
+
+export async function atualizarUsuarioPerfil(
+  db: D1Database,
+  telefone: string,
+  dados: { nome?: string; email?: string | null }
+): Promise<boolean> {
+  const telefoneNormalizado = normalizarTelefone(telefone);
+  const variacoes = telefoneVariacoes(telefone);
+  
+  const updates: string[] = [];
+  const params: Array<string | null> = [];
+  
+  if (dados.nome !== undefined) {
+    updates.push('nome = ?');
+    params.push(dados.nome.trim());
+  }
+  
+  if (dados.email !== undefined) {
+    updates.push('email = ?');
+    params.push(dados.email?.trim() || null);
+  }
+  
+  if (updates.length === 0) return false;
+  
+  updates.push('atualizadoEm = CURRENT_TIMESTAMP');
+  
+  for (const variacao of variacoes) {
+    const result = await db
+      .prepare(`UPDATE usuarios SET ${updates.join(', ')} WHERE telefone = ?`)
+      .bind(...params, variacao)
+      .run();
+    
+    if ((result.meta.changes || 0) > 0) return true;
+  }
+  
+  return false;
+}
+
+export async function excluirTodosDadosUsuario(
+  db: D1Database,
+  telefone: string
+): Promise<{ sucesso: boolean; dadosRemovidos?: { transacoes: number; agendamentos: number; categorias: number; usuarios: number; numerosRegistrados: number } }> {
+  const telefoneNormalizado = normalizarTelefone(telefone);
+  const variacoes = telefoneVariacoes(telefone);
+  
+  let totalTransacoes = 0;
+  let totalAgendamentos = 0;
+  let totalCategorias = 0;
+  let totalUsuarios = 0;
+  let totalNumerosRegistrados = 0;
+  
+  try {
+    for (const variacao of variacoes) {
+      // Remove transações e conta quantas foram removidas
+      const resultTransacoes = await db.prepare('DELETE FROM transacoes WHERE telefone = ?').bind(variacao).run();
+      totalTransacoes += resultTransacoes.meta.changes || 0;
+      
+      // Remove agendamentos e conta quantos foram removidos
+      const resultAgendamentos = await db.prepare('DELETE FROM agendamentos WHERE telefone = ?').bind(variacao).run();
+      totalAgendamentos += resultAgendamentos.meta.changes || 0;
+      
+      // Remove categorias personalizadas e conta quantas foram removidas
+      const resultCategorias = await db.prepare('DELETE FROM categorias WHERE telefone = ? AND padrao = 0').bind(variacao).run();
+      totalCategorias += resultCategorias.meta.changes || 0;
+      
+      // Remove número registrado e conta quantos foram removidos
+      const resultNumeros = await db.prepare('DELETE FROM numeros_registrados WHERE telefone = ?').bind(variacao).run();
+      totalNumerosRegistrados += resultNumeros.meta.changes || 0;
+      
+      // Remove usuário e conta quantos foram removidos
+      const resultUsuarios = await db.prepare('DELETE FROM usuarios WHERE telefone = ?').bind(variacao).run();
+      totalUsuarios += resultUsuarios.meta.changes || 0;
+    }
+    
+    return {
+      sucesso: true,
+      dadosRemovidos: {
+        transacoes: totalTransacoes,
+        agendamentos: totalAgendamentos,
+        categorias: totalCategorias,
+        usuarios: totalUsuarios,
+        numerosRegistrados: totalNumerosRegistrados
+      }
+    };
+  } catch (error) {
+    console.error('Erro ao excluir dados do usuário:', error);
+    return { sucesso: false };
+  }
+}
+
+// ========== FUNÇÕES DE CATEGORIAS ==========
+
+export interface CategoriaRecord {
+  id: number;
+  telefone: string | null;
+  nome: string;
+  descricao: string | null;
+  cor: string | null;
+  padrao: number; // 0 ou 1 (SQLite não tem boolean)
+  tipo: string;
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+// Categorias padrão do sistema
+const CATEGORIAS_PADRAO_D1 = [
+  // Saídas
+  { nome: 'Alimentação', descricao: 'Gastos com comida e restaurantes', tipo: 'saida', cor: '#FF6B6B' },
+  { nome: 'Transporte', descricao: 'Combustível, passagens, táxi', tipo: 'saida', cor: '#4ECDC4' },
+  { nome: 'Moradia', descricao: 'Aluguel, condomínio, água, luz', tipo: 'saida', cor: '#45B7D1' },
+  { nome: 'Saúde', descricao: 'Médicos, remédios, plano de saúde', tipo: 'saida', cor: '#FFA07A' },
+  { nome: 'Educação', descricao: 'Cursos, livros, mensalidades', tipo: 'saida', cor: '#98D8C8' },
+  { nome: 'Lazer', descricao: 'Cinema, viagens, entretenimento', tipo: 'saida', cor: '#F7DC6F' },
+  { nome: 'Compras', descricao: 'Roupas, eletrônicos, supermercado', tipo: 'saida', cor: '#BB8FCE' },
+  { nome: 'Outros', descricao: 'Outras despesas', tipo: 'saida', cor: '#95A5A6' },
+  
+  // Entradas
+  { nome: 'Salário', descricao: 'Rendimento do trabalho', tipo: 'entrada', cor: '#52BE80' },
+  { nome: 'Freelance', descricao: 'Trabalhos autônomos', tipo: 'entrada', cor: '#5DADE2' },
+  { nome: 'Investimentos', descricao: 'Dividendos, juros', tipo: 'entrada', cor: '#F4D03F' },
+  { nome: 'Vendas', descricao: 'Venda de produtos ou serviços', tipo: 'entrada', cor: '#85C1E2' },
+  { nome: 'Outros', descricao: 'Outras receitas', tipo: 'entrada', cor: '#A9DFBF' },
+];
+
+// Inicializar categorias padrão no D1
+async function inicializarCategoriasPadraoD1(db: D1Database): Promise<void> {
+  try {
+    // Verifica se já existem categorias padrão
+    const categoriasExistentes = await db
+      .prepare('SELECT COUNT(*) as count FROM categorias WHERE padrao = 1')
+      .first<{ count: number }>();
+    
+    const count = categoriasExistentes?.count || 0;
+    
+    if (count === 0) {
+      console.log('📋 Criando categorias padrão no D1...');
+      
+      for (const cat of CATEGORIAS_PADRAO_D1) {
+        // Verifica se já existe antes de criar
+        const existente = await db
+          .prepare('SELECT id FROM categorias WHERE padrao = 1 AND nome = ?')
+          .bind(cat.nome)
+          .first();
+        
+        if (!existente) {
+          await db
+            .prepare(`
+              INSERT INTO categorias (telefone, nome, descricao, cor, padrao, tipo, criadoEm, atualizadoEm)
+              VALUES (?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            `)
+            .bind(null, cat.nome, cat.descricao, cat.cor, cat.tipo)
+            .run();
+        }
+      }
+      
+      console.log(`✅ ${CATEGORIAS_PADRAO_D1.length} categorias padrão criadas no D1!`);
+    }
+  } catch (error: any) {
+    console.error('❌ Erro ao inicializar categorias padrão no D1:', error);
+    // Não lança erro para não quebrar a busca
+  }
+}
+
+export async function buscarCategoriasD1(
+  db: D1Database,
+  telefone: string
+): Promise<CategoriaRecord[]> {
+  // Garante que as categorias padrão existem
+  await inicializarCategoriasPadraoD1(db);
+  
+  const variacoes = telefoneVariacoes(telefone);
+  
+  // Busca categorias do usuário e categorias padrão (padrao = 1)
+  const categorias = await db
+    .prepare(`
+      SELECT * FROM categorias 
+      WHERE telefone IN (${variacoes.map(() => '?').join(',')}) OR padrao = 1
+      ORDER BY padrao DESC, nome ASC
+    `)
+    .bind(...variacoes)
+    .all<CategoriaRecord>();
+  
+  return categorias.results || [];
+}
+
+export async function criarCategoriaD1(
+  db: D1Database,
+  telefone: string,
+  dados: { nome: string; descricao?: string; cor?: string; tipo?: string }
+): Promise<number> {
+  const variacoes = telefoneVariacoes(telefone);
+  const preferida = variacoes[0];
+  
+  // Verifica se já existe
+  const existente = await db
+    .prepare('SELECT id FROM categorias WHERE telefone = ? AND nome = ?')
+    .bind(preferida, dados.nome.trim())
+    .first();
+  
+  if (existente) {
+    throw new Error('Já existe uma categoria com este nome');
+  }
+  
+  const result = await db
+    .prepare(`
+      INSERT INTO categorias (telefone, nome, descricao, cor, padrao, tipo, criadoEm, atualizadoEm)
+      VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    .bind(
+      preferida,
+      dados.nome.trim(),
+      dados.descricao?.trim() || null,
+      dados.cor?.trim() || null,
+      dados.tipo || 'saida'
+    )
+    .run();
+  
+  return Number(result.meta.last_row_id);
+}
+
+export async function atualizarCategoriaD1(
+  db: D1Database,
+  id: number,
+  telefone: string,
+  dados: { nome?: string; descricao?: string; cor?: string; tipo?: string }
+): Promise<boolean> {
+  const categoria = await db
+    .prepare('SELECT * FROM categorias WHERE id = ?')
+    .bind(id)
+    .first<CategoriaRecord>();
+  
+  if (!categoria) {
+    throw new Error('Categoria não encontrada');
+  }
+  
+  // PROTEÇÃO CRÍTICA: Nunca permite atualizar categorias padrão, mesmo que alguém tente burlar
+  if (categoria.padrao === 1) {
+    console.warn(`🚫 Tentativa de atualizar categoria padrão bloqueada! ID: ${id}, Nome: ${categoria.nome}`);
+    throw new Error('Não é possível atualizar categorias padrão do sistema');
+  }
+  
+  // Verifica se a categoria pertence ao usuário
+  const variacoes = telefoneVariacoes(telefone);
+  const telefoneCorresponde = variacoes.includes(categoria.telefone || '');
+  
+  if (!telefoneCorresponde) {
+    throw new Error('Você não tem permissão para atualizar esta categoria');
+  }
+  
+  const updates: string[] = [];
+  const params: Array<string | null> = [];
+  
+  if (dados.nome !== undefined) {
+    updates.push('nome = ?');
+    params.push(dados.nome.trim());
+  }
+  if (dados.descricao !== undefined) {
+    updates.push('descricao = ?');
+    params.push(dados.descricao?.trim() || null);
+  }
+  if (dados.cor !== undefined) {
+    updates.push('cor = ?');
+    params.push(dados.cor?.trim() || null);
+  }
+  if (dados.tipo !== undefined) {
+    updates.push('tipo = ?');
+    params.push(dados.tipo);
+  }
+  
+  if (updates.length === 0) return false;
+  
+  updates.push('atualizadoEm = CURRENT_TIMESTAMP');
+  
+  await db
+    .prepare(`UPDATE categorias SET ${updates.join(', ')} WHERE id = ?`)
+    .bind(...params, id)
+    .run();
+  
+  return true;
+}
+
+export async function removerCategoriaD1(
+  db: D1Database,
+  id: number,
+  telefone: string
+): Promise<boolean> {
+  const categoria = await db
+    .prepare('SELECT * FROM categorias WHERE id = ?')
+    .bind(id)
+    .first<CategoriaRecord>();
+  
+  if (!categoria) {
+    throw new Error('Categoria não encontrada');
+  }
+  
+  // PROTEÇÃO CRÍTICA: Nunca permite remover categorias padrão, mesmo que alguém tente burlar
+  if (categoria.padrao === 1) {
+    console.warn(`🚫 Tentativa de remover categoria padrão bloqueada! ID: ${id}, Nome: ${categoria.nome}`);
+    throw new Error('Não é possível remover categorias padrão do sistema');
+  }
+  
+  // Verifica se a categoria pertence ao usuário
+  const variacoes = telefoneVariacoes(telefone);
+  const telefoneCorresponde = variacoes.includes(categoria.telefone || '');
+  
+  if (!telefoneCorresponde) {
+    throw new Error('Você não tem permissão para remover esta categoria');
+  }
+  
+  // PROTEÇÃO EXTRA: SQL também bloqueia categorias padrão (proteção em múltiplas camadas)
+  const result = await db
+    .prepare('DELETE FROM categorias WHERE id = ? AND padrao = 0')
+    .bind(id)
+    .run();
+  
+  // Verifica se realmente deletou (proteção extra)
+  if ((result.meta.changes || 0) === 0) {
+    // Se não deletou, verifica novamente se é padrão (proteção contra race condition)
+    const categoriaVerificada = await db
+      .prepare('SELECT padrao FROM categorias WHERE id = ?')
+      .bind(id)
+      .first<{ padrao: number }>();
+    
+    if (categoriaVerificada && categoriaVerificada.padrao === 1) {
+      throw new Error('Não é possível remover categorias padrão do sistema');
+    }
+    
+    throw new Error('Erro ao remover categoria');
+  }
+  
+  return true;
+}
+
+// ========== FUNÇÕES DE AGENDAMENTOS ==========
+
+export interface AgendamentoRecord {
+  id: number;
+  telefone: string;
+  descricao: string;
+  valor: number;
+  dataAgendamento: string;
+  tipo: string;
+  status: string;
+  categoria: string | null;
+  notificado: number; // 0 ou 1
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+export async function buscarAgendamentosD1(
+  db: D1Database,
+  telefone: string,
+  filtros?: { status?: string; dataInicio?: string; dataFim?: string }
+): Promise<AgendamentoRecord[]> {
+  const variacoes = telefoneVariacoes(telefone);
+  
+  if (variacoes.length === 0) {
+    return [];
+  }
+  
+  let query = `SELECT * FROM agendamentos WHERE telefone IN (${variacoes.map(() => '?').join(',')})`;
+  const params: Array<string> = [...variacoes];
+  
+  if (filtros?.status) {
+    query += ' AND status = ?';
+    params.push(filtros.status);
+  }
+  if (filtros?.dataInicio) {
+    query += ' AND date(dataAgendamento) >= date(?)';
+    params.push(filtros.dataInicio);
+  }
+  if (filtros?.dataFim) {
+    query += ' AND date(dataAgendamento) <= date(?)';
+    params.push(filtros.dataFim);
+  }
+  
+  query += ' ORDER BY date(dataAgendamento) ASC';
+  
+  try {
+    const result = await db.prepare(query).bind(...params).all<AgendamentoRecord>();
+    return result.results || [];
+  } catch (error: any) {
+    console.error('Erro ao buscar agendamentos:', error);
+    console.error('Query:', query);
+    console.error('Params:', params);
+    throw error;
+  }
+}
+
+export async function buscarAgendamentoPorIdD1(
+  db: D1Database,
+  id: number
+): Promise<AgendamentoRecord | null> {
+  const result = await db
+    .prepare('SELECT * FROM agendamentos WHERE id = ?')
+    .bind(id)
+    .first<AgendamentoRecord>();
+  
+  return result || null;
+}
+
+export async function criarAgendamentoD1(
+  db: D1Database,
+  dados: {
+    telefone: string;
+    descricao: string;
+    valor: number;
+    dataAgendamento: string;
+    tipo: string;
+    categoria?: string;
+  }
+): Promise<number> {
+  const variacoes = telefoneVariacoes(dados.telefone);
+  const preferida = variacoes[0];
+  
+  const result = await db
+    .prepare(`
+      INSERT INTO agendamentos 
+      (telefone, descricao, valor, dataAgendamento, tipo, status, categoria, notificado, criadoEm, atualizadoEm)
+      VALUES (?, ?, ?, ?, ?, 'pendente', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    .bind(
+      preferida,
+      dados.descricao,
+      dados.valor,
+      dados.dataAgendamento,
+      dados.tipo,
+      dados.categoria || 'outros'
+    )
+    .run();
+  
+  return Number(result.meta.last_row_id);
+}
+
+export async function atualizarStatusAgendamentoD1(
+  db: D1Database,
+  id: number,
+  status: string
+): Promise<boolean> {
+  const result = await db
+    .prepare('UPDATE agendamentos SET status = ?, atualizadoEm = CURRENT_TIMESTAMP WHERE id = ?')
+    .bind(status, id)
+    .run();
+  
+  return (result.meta.changes || 0) > 0;
+}
+
+export async function removerAgendamentoD1(
+  db: D1Database,
+  id: number
+): Promise<boolean> {
+  const result = await db
+    .prepare('DELETE FROM agendamentos WHERE id = ?')
+    .bind(id)
+    .run();
+  
+  return (result.meta.changes || 0) > 0;
+}
+
+// ========== NOTIFICAÇÕES (para SSE fallback) ==========
+
+// Cria a tabela de notificações se não existir
+export async function criarTabelaNotificacoes(db: D1Database): Promise<void> {
+  try {
+    // Executa queries separadamente para evitar problemas com db.exec()
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS notificacoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telefone TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        dados TEXT NOT NULL,
+        lida INTEGER NOT NULL DEFAULT 0,
+        criadoEm TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+    
+    // Cria índices separadamente
+    try {
+      await db.prepare('CREATE INDEX IF NOT EXISTS idx_notificacoes_telefone ON notificacoes(telefone)').run();
+    } catch (e) {
+      // Índice pode já existir, ignora erro
+      console.log('   ℹ️  Índice idx_notificacoes_telefone já existe ou erro ao criar');
+    }
+    
+    try {
+      await db.prepare('CREATE INDEX IF NOT EXISTS idx_notificacoes_lida ON notificacoes(lida)').run();
+    } catch (e) {
+      // Índice pode já existir, ignora erro
+      console.log('   ℹ️  Índice idx_notificacoes_lida já existe ou erro ao criar');
+    }
+  } catch (error: any) {
+    // Se a tabela já existe, não é um erro crítico
+    if (error.message && error.message.includes('already exists')) {
+      console.log('   ℹ️  Tabela notificacoes já existe');
+      return;
+    }
+    console.error('❌ Erro ao criar tabela notificacoes:', error);
+    throw error;
+  }
+}
+
+// Salva uma notificação no D1
+export async function salvarNotificacaoD1(
+  db: D1Database,
+  telefone: string,
+  tipo: string,
+  dados: any
+): Promise<number> {
+  // Garante que a tabela existe
+  await criarTabelaNotificacoes(db);
+  
+  const dadosJson = JSON.stringify(dados);
+  const result = await db
+    .prepare('INSERT INTO notificacoes (telefone, tipo, dados, lida) VALUES (?, ?, ?, 0)')
+    .bind(telefone, tipo, dadosJson)
+    .run();
+  
+  return Number(result.meta.last_row_id);
+}
+
+// Busca notificações não lidas para um telefone
+export async function buscarNotificacoesNaoLidasD1(
+  db: D1Database,
+  telefone: string
+): Promise<NotificacaoRecord[]> {
+  try {
+    await criarTabelaNotificacoes(db);
+    
+    if (!db) {
+      console.error('❌ Database não disponível em buscarNotificacoesNaoLidasD1');
+      return [];
+    }
+    
+    const result = await db
+      .prepare('SELECT * FROM notificacoes WHERE telefone = ? AND lida = 0 ORDER BY criadoEm DESC LIMIT 50')
+      .bind(telefone)
+      .all<NotificacaoRecord>();
+    
+    if (!result) {
+      console.warn('⚠️ Resultado da query de notificações é null/undefined');
+      return [];
+    }
+    
+    if (!result.results) {
+      console.warn('⚠️ result.results é null/undefined');
+      return [];
+    }
+    
+    // Valida e filtra resultados inválidos
+    return result.results.filter((not: any) => {
+      if (!not || typeof not !== 'object') {
+        return false;
+      }
+      // Valida campos obrigatórios
+      return not.hasOwnProperty('telefone') && not.hasOwnProperty('tipo');
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao buscar notificações:', error);
+    console.error('   Stack:', error.stack);
+    return [];
+  }
+}
+
+// Marca notificações como lidas
+export async function marcarNotificacoesComoLidasD1(
+  db: D1Database,
+  telefone: string,
+  ids?: number[]
+): Promise<number> {
+  await criarTabelaNotificacoes(db);
+  
+  if (ids && ids.length > 0) {
+    const placeholders = ids.map(() => '?').join(',');
+    const result = await db
+      .prepare(`UPDATE notificacoes SET lida = 1 WHERE telefone = ? AND id IN (${placeholders})`)
+      .bind(telefone, ...ids)
+      .run();
+    return result.meta.changes || 0;
+  } else {
+    // Marca todas como lidas
+    const result = await db
+      .prepare('UPDATE notificacoes SET lida = 1 WHERE telefone = ? AND lida = 0')
+      .bind(telefone)
+      .run();
+    return result.meta.changes || 0;
+  }
+}
+
+// Remove notificações antigas (mais de 24 horas)
+export async function limparNotificacoesAntigasD1(db: D1Database): Promise<number> {
+  await criarTabelaNotificacoes(db);
+  
+  const result = await db
+    .prepare('DELETE FROM notificacoes WHERE lida = 1 AND criadoEm < datetime("now", "-1 day")')
+    .run();
+  
+  return result.meta.changes || 0;
 }
