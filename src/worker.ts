@@ -1010,12 +1010,12 @@ app.post('/webhook/whatsapp', async (c) => {
     mensagemOriginal: mensagem,
   });
   
-  // Notifica clientes SSE sobre nova transação
-  notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
-    id: transacaoId,
-    tipo: 'transacao',
-    mensagem: 'Nova transação registrada'
-  });
+  // SSE desabilitado - usando apenas botão de atualizar manual
+  // notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+  //   id: transacaoId,
+  //   tipo: 'transacao',
+  //   mensagem: 'Nova transação registrada'
+  // });
 
   const twiml = `<Response><Message>Recebido! Registramos sua mensagem.</Message></Response>`;
   return new Response(twiml, {
@@ -1955,12 +1955,12 @@ app.delete('/api/categorias/:id', async (c) => {
     
     await removerCategoriaD1(c.env.financezap_db, id, telefoneFormatado);
     
-    // Notifica clientes SSE sobre atualização
-    notificarClientesSSE(telefoneFormatado, 'categoria-removida', {
-      id,
-      tipo: 'categoria',
-      mensagem: 'Categoria removida'
-    }, c.env.financezap_db);
+    // SSE desabilitado - usando apenas botão de atualizar manual
+    // notificarClientesSSE(telefoneFormatado, 'categoria-removida', {
+    //   id,
+    //   tipo: 'categoria',
+    //   mensagem: 'Categoria removida'
+    // }, c.env.financezap_db);
     
     return c.json({ success: true, message: 'Categoria removida com sucesso' });
   } catch (error: any) {
@@ -1969,156 +1969,14 @@ app.delete('/api/categorias/:id', async (c) => {
 });
 
 // ========== SERVER-SENT EVENTS (SSE) ==========
+// SSE DESABILITADO - Usando apenas botão de atualizar manual
 
-// Rota SSE para atualizações em tempo real
+// Rota SSE desabilitada
 app.get('/api/events', async (c) => {
-  try {
-    // Autenticação obrigatória
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return c.json({ success: false, error: 'Token não fornecido' }, 401);
-    }
-    
-    const token = authHeader.substring(7);
-    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
-    
-    let telefoneFormatado: string;
-    try {
-      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
-      telefoneFormatado = formatarTelefone(telefone);
-    } catch (error: any) {
-      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
-    }
-    
-    console.log(`📡 Cliente SSE conectado: ${telefoneFormatado}`);
-    
-    // Cria stream SSE
-    let streamController: ReadableStreamDefaultController | null = null;
-    const telefoneSemPrefixo = telefoneFormatado.replace('whatsapp:', '').replace(/^\+/, '');
-    
-    // Gera TODAS as variações possíveis do telefone (incluindo com/sem o 9)
-    const telefonesParaAdicionar = telefoneVariacoes(telefoneFormatado);
-    console.log(`📡 SSE: Registrando cliente para ${telefonesParaAdicionar.length} variações:`, telefonesParaAdicionar);
-    
-    // Adiciona variações com/sem o dígito 9 (para números brasileiros)
-    if (telefoneSemPrefixo.startsWith('55') && telefoneSemPrefixo.length === 13) {
-      // Número com 9 dígitos: remove o 9
-      const sem9 = telefoneSemPrefixo.substring(0, 4) + telefoneSemPrefixo.substring(5);
-      telefonesParaAdicionar.push(sem9, `+${sem9}`, `whatsapp:+${sem9}`, `whatsapp:${sem9}`);
-    } else if (telefoneSemPrefixo.startsWith('55') && telefoneSemPrefixo.length === 12) {
-      // Número sem 9 dígitos: adiciona o 9
-      const com9 = telefoneSemPrefixo.substring(0, 4) + '9' + telefoneSemPrefixo.substring(4);
-      telefonesParaAdicionar.push(com9, `+${com9}`, `whatsapp:+${com9}`, `whatsapp:${com9}`);
-    }
-    
-    const stream = new ReadableStream({
-      start(controller) {
-        streamController = controller;
-        
-        // Adiciona cliente à lista
-        telefonesParaAdicionar.forEach(tel => {
-          if (!clientesSSE.has(tel)) {
-            clientesSSE.set(tel, []);
-          }
-          clientesSSE.get(tel)!.push(controller);
-          console.log(`📡 SSE: Cliente adicionado para telefone: ${tel} (total: ${clientesSSE.get(tel)!.length})`);
-        });
-        
-        console.log(`📡 SSE: Clientes SSE ativos:`, Array.from(clientesSSE.keys()));
-        
-        // Envia mensagem de conexão
-        const mensagemInicial = `event: connected\ndata: ${JSON.stringify({ message: 'Conectado' })}\n\n`;
-        controller.enqueue(new TextEncoder().encode(mensagemInicial));
-        
-        // Keep-alive: envia ping periodicamente para manter conexão viva
-        // Usa uma função recursiva com setTimeout (compatível com Cloudflare Workers)
-        const enviarKeepAlive = () => {
-          try {
-            const ping = `: ping\n\n`;
-            controller.enqueue(new TextEncoder().encode(ping));
-            console.log(`💓 SSE: Keep-alive ping enviado para ${telefoneFormatado}`);
-            
-            // Agenda próximo ping em 30 segundos
-            setTimeout(() => {
-              if (streamController === controller) {
-                enviarKeepAlive();
-              }
-            }, 30000);
-          } catch (error) {
-            console.error('❌ Erro ao enviar keep-alive:', error);
-          }
-        };
-        
-        // Inicia keep-alive após 30 segundos
-        setTimeout(() => {
-          if (streamController === controller) {
-            enviarKeepAlive();
-          }
-        }, 30000);
-        
-        // Limpa conexão quando o cliente desconecta
-        const limparConexao = () => {
-          streamController = null; // Marca como desconectado
-          telefonesParaAdicionar.forEach(tel => {
-            const clientes = clientesSSE.get(tel);
-            if (clientes) {
-              const index = clientes.indexOf(controller);
-              if (index > -1) {
-                clientes.splice(index, 1);
-              }
-              if (clientes.length === 0) {
-                clientesSSE.delete(tel);
-              }
-            }
-          });
-          console.log(`📡 Cliente SSE desconectado: ${telefoneFormatado}`);
-        };
-        
-        // Detecta desconexão
-        c.req.raw.signal?.addEventListener('abort', limparConexao);
-      },
-      cancel() {
-        // Marca como desconectado
-        streamController = null;
-        // Remove cliente quando conexão é cancelada
-        if (streamController) {
-          telefonesParaAdicionar.forEach(tel => {
-            const clientes = clientesSSE.get(tel);
-            if (clientes) {
-              const index = clientes.indexOf(streamController!);
-              if (index > -1) {
-                clientes.splice(index, 1);
-              }
-              if (clientes.length === 0) {
-                clientesSSE.delete(tel);
-              }
-            }
-          });
-        }
-        console.log(`📡 Cliente SSE desconectado (cancel): ${telefoneFormatado}`);
-      }
-    });
-    
-    // Obtém a origem da requisição para CORS
-    const origin = c.req.header('Origin') || null;
-    const allowedOrigins = parseAllowedOrigins(c.env.ALLOWED_ORIGINS);
-    const allowedOrigin = isOriginAllowed(origin, allowedOrigins) ? (origin || '*') : (allowedOrigins[0] || '*');
-    
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': allowedOrigin,
-        'Access-Control-Allow-Headers': 'Authorization, Accept, Cache-Control',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Credentials': 'true',
-      },
-    });
-  } catch (error: any) {
-    console.error('❌ Erro na conexão SSE:', error);
-    return c.json({ success: false, error: error.message }, 500);
-  }
+  return c.json({ 
+    success: false, 
+    error: 'SSE desabilitado. Use o botão "Atualizar" para atualizar os dados manualmente.' 
+  }, 503);
 });
 
 // ========== ENDPOINTS DE AGENDAMENTOS ==========
@@ -2225,12 +2083,12 @@ app.put('/api/agendamentos/:id', async (c) => {
         mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`
       });
       
-      // Notifica clientes SSE sobre nova transação
-      notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
-        id: transacaoId,
-        tipo: 'transacao',
-        mensagem: 'Nova transação registrada'
-      }, c.env.financezap_db);
+      // SSE desabilitado - usando apenas botão de atualizar manual
+      // notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+      //   id: transacaoId,
+      //   tipo: 'transacao',
+      //   mensagem: 'Nova transação registrada'
+      // }, c.env.financezap_db);
     }
     
     return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
@@ -3030,29 +2888,28 @@ app.post('/webhook/zapi', async (c) => {
             console.warn('⚠️ Erro ao buscar telefone do usuário:', error);
           }
           
-          // Notifica clientes SSE sobre nova transação (tenta com o telefone do banco e variações)
-          notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
-            id: transacaoId,
-            tipo: 'transacao',
-            mensagem: 'Nova transação registrada'
-          }, c.env.financezap_db);
+          // SSE desabilitado - usando apenas botão de atualizar manual
+          // notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
+          //   id: transacaoId,
+          //   tipo: 'transacao',
+          //   mensagem: 'Nova transação registrada'
+          // }, c.env.financezap_db);
           
-          // Também tenta notificar com telefoneFormatado e cleanFromNumber (para garantir)
-          if (telefoneParaNotificar !== telefoneFormatado) {
-            notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
-              id: transacaoId,
-              tipo: 'transacao',
-              mensagem: 'Nova transação registrada'
-            }, c.env.financezap_db);
-          }
+          // if (telefoneParaNotificar !== telefoneFormatado) {
+          //   notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+          //     id: transacaoId,
+          //     tipo: 'transacao',
+          //     mensagem: 'Nova transação registrada'
+          //   }, c.env.financezap_db);
+          // }
           
-          if (telefoneParaNotificar !== cleanFromNumber) {
-            notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
-              id: transacaoId,
-              tipo: 'transacao',
-              mensagem: 'Nova transação registrada'
-            }, c.env.financezap_db);
-          }
+          // if (telefoneParaNotificar !== cleanFromNumber) {
+          //   notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
+          //     id: transacaoId,
+          //     tipo: 'transacao',
+          //     mensagem: 'Nova transação registrada'
+          //   }, c.env.financezap_db);
+          // }
           
           // Calcula total
           if (tipoFinal === 'entrada') {
@@ -3167,28 +3024,26 @@ app.post('/webhook/zapi', async (c) => {
           console.warn('⚠️ Erro ao buscar telefone do usuário:', error);
         }
         
-        // Notifica clientes SSE sobre nova transação
-        // Tenta com ambos os formatos: telefoneFormatado e cleanFromNumber
-        notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
-          id: transacaoId,
-          tipo: 'transacao',
-          mensagem: 'Nova transação registrada'
-        }, c.env.financezap_db);
+        // SSE desabilitado - usando apenas botão de atualizar manual
+        // notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
+        //   id: transacaoId,
+        //   tipo: 'transacao',
+        //   mensagem: 'Nova transação registrada'
+        // }, c.env.financezap_db);
         
-        if (telefoneParaNotificar !== telefoneFormatado) {
-          notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
-            id: transacaoId,
-            tipo: 'transacao',
-            mensagem: 'Nova transação registrada'
-          }, c.env.financezap_db);
-        }
+        // if (telefoneParaNotificar !== telefoneFormatado) {
+        //   notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
+        //     id: transacaoId,
+        //     tipo: 'transacao',
+        //     mensagem: 'Nova transação registrada'
+        //   }, c.env.financezap_db);
+        // }
         
-        // Também tenta notificar com cleanFromNumber (sem whatsapp:)
-        notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
-          id: transacaoId,
-          tipo: 'transacao',
-          mensagem: 'Nova transação registrada'
-        }, c.env.financezap_db);
+        // notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
+        //   id: transacaoId,
+        //   tipo: 'transacao',
+        //   mensagem: 'Nova transação registrada'
+        // }, c.env.financezap_db);
         
         // Função para gerar identificador único (ex: AQTXU)
         const gerarIdentificador = (id: number): string => {
