@@ -36,9 +36,10 @@ export function gerarToken(telefone: string): string {
   };
 
   const secret: string = JWT_SECRET || 'default-secret-for-development-only';
-  return jwt.sign(payload, secret as string, {
-    expiresIn: JWT_EXPIRES_IN as string,
-  });
+  const expiresIn: string = JWT_EXPIRES_IN || '7d';
+  return jwt.sign(payload, secret, {
+    expiresIn: expiresIn,
+  } as jwt.SignOptions);
 }
 
 /**

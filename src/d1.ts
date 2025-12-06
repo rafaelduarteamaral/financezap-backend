@@ -1,5 +1,36 @@
 // Utilidades para acessar o D1 no Cloudflare Workers (substitui Prisma no Worker)
 
+// Interface para D1Database (compatível com Cloudflare Workers)
+export interface D1Database {
+  prepare(query: string): D1PreparedStatement;
+  exec?(query: string): Promise<D1ExecResult>;
+}
+
+interface D1PreparedStatement {
+  bind(...values: any[]): D1PreparedStatement;
+  first<T = any>(colName?: string): Promise<T | null>;
+  run(): Promise<D1Result>;
+  all<T = any>(): Promise<D1Result<T>>;
+}
+
+interface D1Result<T = any> {
+  results: T[];
+  success: boolean;
+  meta: {
+    duration: number;
+    rows_read: number;
+    rows_written: number;
+    last_row_id: number;
+    changed_db: boolean;
+    changes: number;
+  };
+}
+
+interface D1ExecResult {
+  count: number;
+  duration: number;
+}
+
 export interface NotificacaoRecord {
   id?: number;
   telefone: string;
@@ -263,12 +294,12 @@ export async function buscarTransacoes(
   
   console.log('🔍 Resultado do SELECT:', {
     quantidade: rows.results?.length ?? 0,
-    telefonesEncontrados: rows.results?.map(t => t.telefone).slice(0, 5) ?? []
+    telefonesEncontrados: rows.results?.map((t: any) => t.telefone).slice(0, 5) ?? []
   });
 
   return {
     total: totalRow?.total ?? 0,
-    transacoes: (rows.results || []).map((t) => ({
+    transacoes: (rows.results || []).map((t: any) => ({
       ...t,
       mensagemOriginal: t.mensagemOriginal ?? null,
       dataHora: t.dataHora ?? new Date().toISOString(),
@@ -382,7 +413,7 @@ export async function gastosPorDia(
     .bind(...params, dias)
     .all<{ data: string; entradas: number; saidas: number }>();
 
-  return (rows.results || []).map((row) => ({
+  return (rows.results || []).map((row: any) => ({
     data: row.data,
     entradas: row.entradas || 0,
     saidas: row.saidas || 0,

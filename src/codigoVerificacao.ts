@@ -13,17 +13,8 @@ interface CodigoVerificacao {
   expiraEm: Date;
 }
 
-// Interface para D1Database (compatível com Cloudflare Workers)
-interface D1Database {
-  prepare(query: string): D1PreparedStatement;
-}
-
-interface D1PreparedStatement {
-  bind(...values: any[]): D1PreparedStatement;
-  first<T = any>(): Promise<T | null>;
-  all<T = any>(): Promise<{ results: T[] }>;
-  run(): Promise<{ meta: { last_row_id: number; changes: number } }>;
-}
+// Importa a interface D1Database de d1.ts para manter consistência
+import type { D1Database } from './d1';
 
 // Armazena códigos em memória (fallback para desenvolvimento local)
 const codigosVerificacao = new Map<string, CodigoVerificacao>();
