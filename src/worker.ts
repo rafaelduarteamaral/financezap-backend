@@ -1085,6 +1085,78 @@ app.get('/api/transacoes', async (c) => {
   }
 });
 
+// API: Criar nova transação - PROTEGIDA
+app.post('/api/transacoes', async (c) => {
+  try {
+    // AUTENTICAÇÃO OBRIGATÓRIA - Extrai telefone do token JWT
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const body = await c.req.json();
+    const { descricao, valor, categoria, tipo, metodo, dataHora, data } = body;
+    
+    // Validações
+    if (!descricao || !descricao.trim()) {
+      return c.json({ success: false, error: 'Descrição é obrigatória' }, 400);
+    }
+    
+    if (!valor || isNaN(Number(valor)) || Number(valor) <= 0) {
+      return c.json({ success: false, error: 'Valor inválido' }, 400);
+    }
+    
+    if (!tipo || !['entrada', 'saida'].includes(tipo)) {
+      return c.json({ success: false, error: 'Tipo deve ser "entrada" ou "saida"' }, 400);
+    }
+    
+    if (!metodo || !['credito', 'debito'].includes(metodo)) {
+      return c.json({ success: false, error: 'Método deve ser "credito" ou "debito"' }, 400);
+    }
+    
+    // Prepara dados da transação
+    const agora = new Date();
+    const dataHoraFormatada = dataHora || agora.toLocaleString('pt-BR');
+    const dataFormatada = data || agora.toISOString().split('T')[0];
+    
+    const transacao = {
+      telefone: telefoneFormatado,
+      descricao: descricao.trim(),
+      valor: Number(valor),
+      categoria: categoria || 'outros',
+      tipo: tipo,
+      metodo: metodo,
+      dataHora: dataHoraFormatada,
+      data: dataFormatada,
+    };
+    
+    const id = await salvarTransacao(c.env.financezap_db, transacao);
+    
+    return c.json({
+      success: true,
+      message: 'Transação criada com sucesso',
+      transacao: {
+        id,
+        ...transacao
+      }
+    });
+  } catch (error: any) {
+    console.error('Erro em POST /api/transacoes:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao criar transação' }, 500);
+  }
+});
+
 app.delete('/api/transacoes/:id', async (c) => {
   try {
     // AUTENTICAÇÃO OBRIGATÓRIA - Extrai telefone do token JWT
@@ -1260,7 +1332,7 @@ app.post('/api/auth/solicitar-codigo', async (c) => {
     
     // Gera código de verificação
     const codigo = gerarCodigoVerificacao();
-    salvarCodigoVerificacao(telefoneFormatado, codigo);
+    await salvarCodigoVerificacao(telefoneFormatado, codigo, c.env.financezap_db);
     
     console.log(`🔐 Código gerado para ${telefoneFormatado}: ${codigo}`);
     
@@ -1318,7 +1390,7 @@ app.post('/api/auth/verificar-codigo', async (c) => {
     const telefoneFormatado = formatarTelefone(telefone);
     
     // Verifica o código
-    const codigoValido = verificarCodigo(telefoneFormatado, codigo);
+    const codigoValido = await verificarCodigo(telefoneFormatado, codigo, c.env.financezap_db);
     
     if (!codigoValido) {
       return c.json({
@@ -2025,6 +2097,76 @@ app.get('/api/agendamentos', async (c) => {
   } catch (error: any) {
     console.error('Erro em GET /api/agendamentos:', error);
     return c.json({ success: false, error: error.message || 'Erro ao buscar agendamentos' }, 500);
+  }
+});
+
+// API: Criar novo agendamento - PROTEGIDA
+app.post('/api/agendamentos', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const body = await c.req.json();
+    const { descricao, valor, dataAgendamento, tipo, categoria } = body;
+    
+    // Validações
+    if (!descricao || !descricao.trim()) {
+      return c.json({ success: false, error: 'Descrição é obrigatória' }, 400);
+    }
+    
+    if (!valor || isNaN(Number(valor)) || Number(valor) <= 0) {
+      return c.json({ success: false, error: 'Valor inválido' }, 400);
+    }
+    
+    if (!dataAgendamento) {
+      return c.json({ success: false, error: 'Data do agendamento é obrigatória' }, 400);
+    }
+    
+    if (!tipo || !['pagamento', 'recebimento'].includes(tipo)) {
+      return c.json({ success: false, error: 'Tipo deve ser "pagamento" ou "recebimento"' }, 400);
+    }
+    
+    // Valida formato da data (YYYY-MM-DD)
+    const dataRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dataRegex.test(dataAgendamento)) {
+      return c.json({ success: false, error: 'Formato de data inválido. Use YYYY-MM-DD' }, 400);
+    }
+    
+    const agendamento = {
+      telefone: telefoneFormatado,
+      descricao: descricao.trim(),
+      valor: Number(valor),
+      dataAgendamento: dataAgendamento,
+      tipo: tipo,
+      categoria: categoria || 'outros',
+    };
+    
+    const id = await criarAgendamentoD1(c.env.financezap_db, agendamento);
+    
+    return c.json({
+      success: true,
+      message: 'Agendamento criado com sucesso',
+      agendamento: {
+        id,
+        ...agendamento,
+        status: 'pendente'
+      }
+    });
+  } catch (error: any) {
+    console.error('Erro em POST /api/agendamentos:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao criar agendamento' }, 500);
   }
 });
 

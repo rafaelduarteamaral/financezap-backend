@@ -555,7 +555,7 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               telefone: cleanFromNumber,
               descricao: agendamentoEncontrado.descricao,
               valor: agendamentoEncontrado.valor,
-              categoria: agendamentoEncontrado.categoria,
+              categoria: agendamentoEncontrado.categoria || 'outros',
               tipo: agendamentoEncontrado.tipo === 'pagamento' ? 'saida' : 'entrada',
               metodo: 'debito',
               dataHora: agora.toISOString(),
@@ -1476,6 +1476,131 @@ app.get('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (r
   }
 });
 
+// API: Criar nova transação - PROTEGIDA
+app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const telefone = req.telefone;
+    
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+    
+    console.log('\n═══════════════════════════════════════════════════════════');
+    console.log('📥 POST /api/transacoes - Criando nova transação');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📞 Telefone do token:', telefone);
+    console.log('📦 Body recebido:', JSON.stringify(req.body, null, 2));
+    
+    const { descricao, valor, categoria, tipo, metodo, dataHora, data } = req.body;
+    
+    // Validações
+    if (!descricao || !descricao.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Descrição é obrigatória'
+      });
+    }
+    
+    if (!valor || isNaN(Number(valor)) || Number(valor) <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valor inválido'
+      });
+    }
+    
+    if (!tipo || !['entrada', 'saida'].includes(tipo)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tipo deve ser "entrada" ou "saida"'
+      });
+    }
+    
+    if (!metodo || !['credito', 'debito'].includes(metodo)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Método deve ser "credito" ou "debito"'
+      });
+    }
+    
+    // Formata o telefone
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+    
+    // Prepara dados da transação
+    const agora = new Date();
+    const dataHoraFormatada = dataHora || agora.toLocaleString('pt-BR');
+    const dataFormatada = data || agora.toISOString().split('T')[0];
+    
+    const transacao: Transacao = {
+      telefone: telefoneFormatado,
+      descricao: descricao.trim(),
+      valor: Number(valor),
+      categoria: categoria || 'outros',
+      tipo: tipo,
+      metodo: metodo,
+      dataHora: dataHoraFormatada,
+      data: dataFormatada,
+    };
+    
+    console.log('\n═══════════════════════════════════════════════════════════');
+    console.log('📥 POST /api/transacoes - Criando nova transação');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📞 Telefone:', telefoneFormatado);
+    console.log('📝 Dados recebidos:', {
+      descricao,
+      valor,
+      categoria,
+      tipo,
+      metodo,
+      dataHora: dataHoraFormatada,
+      data: dataFormatada,
+    });
+    
+    const id = await salvarTransacao(transacao);
+    
+    console.log('✅ Transação criada com sucesso! ID:', id);
+    
+    // Verifica se a transação foi salva corretamente
+    const transacaoSalva = await prisma.transacao.findUnique({
+      where: { id }
+    });
+    
+    if (transacaoSalva) {
+      console.log('✅ Transação confirmada no banco:', {
+        id: transacaoSalva.id,
+        telefone: transacaoSalva.telefone,
+        descricao: transacaoSalva.descricao,
+        dataHora: transacaoSalva.dataHora
+      });
+    } else {
+      console.error('❌ ERRO: Transação não encontrada no banco após salvar!');
+    }
+    
+    console.log('═══════════════════════════════════════════════════════════\n');
+    
+    res.json({
+      success: true,
+      message: 'Transação criada com sucesso',
+      transacao: {
+        id,
+        ...transacao
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao criar transação:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao criar transação'
+    });
+  }
+});
+
 // API: Deletar transação - PROTEGIDA
 app.delete('/api/transacoes/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
   try {
@@ -1680,7 +1805,7 @@ app.post('/api/auth/solicitar-codigo', async (req, res) => {
     
     // Gera código de verificação
     const codigo = gerarCodigoVerificacao();
-    salvarCodigoVerificacao(telefoneFormatado, codigo);
+    await salvarCodigoVerificacao(telefoneFormatado, codigo);
     
     // LOG PARA DESENVOLVIMENTO: Mostra o código no console
     console.log('\n═══════════════════════════════════════════════════════════');
@@ -1941,7 +2066,7 @@ app.post('/api/auth/verificar-codigo', async (req, res) => {
     console.log('   Código recebido do frontend:', codigo);
     
     // Verifica o código (já normaliza internamente)
-    const codigoValido = verificarCodigo(telefoneFormatado, codigo);
+    const codigoValido = await verificarCodigo(telefoneFormatado, codigo);
     
     if (!codigoValido) {
       return res.status(401).json({
@@ -1986,6 +2111,9 @@ app.post('/api/auth/verificar-codigo', async (req, res) => {
     if (!(await numeroEstaRegistrado(telefoneFormatado))) {
       await registrarNumero(telefoneFormatado);
     }
+    
+    // Cria templates padrão se não existirem
+    await criarTemplatesPadrao(telefoneFormatado);
     
     // Gera token JWT
     const token = gerarToken(telefoneFormatado);
@@ -2081,7 +2209,7 @@ app.put('/api/auth/perfil', autenticarMiddleware, validarPermissaoDados, async (
       });
     }
 
-    // Atualiza o usuário
+    // Atualiza o usuário (nome e email)
     const dadosAtualizacao: any = {
       nome: nome.trim()
     };
@@ -2125,6 +2253,441 @@ app.put('/api/auth/perfil', autenticarMiddleware, validarPermissaoDados, async (
     res.status(500).json({
       success: false,
       error: error.message || 'Erro ao atualizar perfil'
+    });
+  }
+});
+
+// Função auxiliar para criar templates padrão
+async function criarTemplatesPadrao(telefone: string) {
+  const telefoneFormatado = telefone.startsWith('whatsapp:') 
+    ? telefone 
+    : telefone.startsWith('+')
+    ? `whatsapp:${telefone}`
+    : `whatsapp:+${telefone}`;
+
+  // Verifica se já existem templates para este usuário
+  const templatesExistentes = await prisma.template.findMany({
+    where: { telefone: telefoneFormatado }
+  });
+
+  if (templatesExistentes.length > 0) {
+    return; // Já existem templates
+  }
+
+  // Template Dark
+  const templateDark = await prisma.template.create({
+    data: {
+      telefone: telefoneFormatado,
+      nome: 'Dark',
+      tipo: 'dark',
+      corPrimaria: '#3B82F6',
+      corSecundaria: '#8B5CF6',
+      corDestaque: '#10B981',
+      corFundo: '#1E293B',
+      corTexto: '#F1F5F9',
+      ativo: 0
+    }
+  });
+
+  // Template Light
+  const templateLight = await prisma.template.create({
+    data: {
+      telefone: telefoneFormatado,
+      nome: 'Light',
+      tipo: 'light',
+      corPrimaria: '#3B82F6',
+      corSecundaria: '#8B5CF6',
+      corDestaque: '#10B981',
+      corFundo: '#F9FAFB',
+      corTexto: '#111827',
+      ativo: 1 // Light é o padrão
+    }
+  });
+
+  // Atualiza o usuário com o template ativo
+  await prisma.usuario.update({
+    where: { telefone: telefoneFormatado },
+    data: { templateAtivoId: templateLight.id }
+  });
+
+  console.log(`✅ Templates padrão criados para: ${telefoneFormatado}`);
+}
+
+// API: Listar templates - PROTEGIDA
+app.get('/api/templates', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const telefone = req.telefone;
+
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+
+    // Cria templates padrão se não existirem
+    await criarTemplatesPadrao(telefoneFormatado);
+
+    const templates = await prisma.template.findMany({
+      where: { telefone: telefoneFormatado },
+      orderBy: [
+        { ativo: 'desc' },
+        { tipo: 'asc' },
+        { criadoEm: 'asc' }
+      ]
+    });
+
+    res.json({
+      success: true,
+      templates: templates.map(t => ({
+        id: t.id,
+        nome: t.nome,
+        tipo: t.tipo,
+        corPrimaria: t.corPrimaria,
+        corSecundaria: t.corSecundaria,
+        corDestaque: t.corDestaque,
+        corFundo: t.corFundo,
+        corTexto: t.corTexto,
+        ativo: t.ativo === 1,
+        criadoEm: t.criadoEm
+      }))
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao listar templates:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao listar templates'
+    });
+  }
+});
+
+// API: Criar template - PROTEGIDA
+app.post('/api/templates', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { nome, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto } = req.body;
+    const telefone = req.telefone;
+
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+
+    if (!nome || !nome.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Nome do template é obrigatório'
+      });
+    }
+
+    // Valida formato hex das cores
+    const hexRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+    const cores = [corPrimaria, corSecundaria, corDestaque, corFundo, corTexto];
+    for (const cor of cores) {
+      if (!cor || !hexRegex.test(cor)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Todas as cores devem estar no formato hexadecimal (ex: #3B82F6)'
+        });
+      }
+    }
+
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+
+    const template = await prisma.template.create({
+      data: {
+        telefone: telefoneFormatado,
+        nome: nome.trim(),
+        tipo: 'custom',
+        corPrimaria,
+        corSecundaria,
+        corDestaque,
+        corFundo,
+        corTexto,
+        ativo: 0
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Template criado com sucesso',
+      template: {
+        id: template.id,
+        nome: template.nome,
+        tipo: template.tipo,
+        corPrimaria: template.corPrimaria,
+        corSecundaria: template.corSecundaria,
+        corDestaque: template.corDestaque,
+        corFundo: template.corFundo,
+        corTexto: template.corTexto,
+        ativo: template.ativo === 1
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao criar template:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao criar template'
+    });
+  }
+});
+
+// API: Atualizar template - PROTEGIDA
+app.put('/api/templates/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto } = req.body;
+    const telefone = req.telefone;
+
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+
+    // Verifica se o template pertence ao usuário
+    const template = await prisma.template.findFirst({
+      where: { id: parseInt(id), telefone: telefoneFormatado }
+    });
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        error: 'Template não encontrado'
+      });
+    }
+
+    // Não permite editar templates padrão (dark e light)
+    if (template.tipo !== 'custom') {
+      return res.status(400).json({
+        success: false,
+        error: 'Não é possível editar templates padrão'
+      });
+    }
+
+    const dadosAtualizacao: any = {};
+    if (nome) dadosAtualizacao.nome = nome.trim();
+    
+    // Valida formato hex das cores se fornecidas
+    const hexRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+    if (corPrimaria !== undefined) {
+      if (!corPrimaria || !hexRegex.test(corPrimaria)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cor primária deve estar no formato hexadecimal'
+        });
+      }
+      dadosAtualizacao.corPrimaria = corPrimaria;
+    }
+    if (corSecundaria !== undefined) {
+      if (!corSecundaria || !hexRegex.test(corSecundaria)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cor secundária deve estar no formato hexadecimal'
+        });
+      }
+      dadosAtualizacao.corSecundaria = corSecundaria;
+    }
+    if (corDestaque !== undefined) {
+      if (!corDestaque || !hexRegex.test(corDestaque)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cor de destaque deve estar no formato hexadecimal'
+        });
+      }
+      dadosAtualizacao.corDestaque = corDestaque;
+    }
+    if (corFundo !== undefined) {
+      if (!corFundo || !hexRegex.test(corFundo)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cor de fundo deve estar no formato hexadecimal'
+        });
+      }
+      dadosAtualizacao.corFundo = corFundo;
+    }
+    if (corTexto !== undefined) {
+      if (!corTexto || !hexRegex.test(corTexto)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cor de texto deve estar no formato hexadecimal'
+        });
+      }
+      dadosAtualizacao.corTexto = corTexto;
+    }
+
+    const templateAtualizado = await prisma.template.update({
+      where: { id: parseInt(id) },
+      data: dadosAtualizacao
+    });
+
+    res.json({
+      success: true,
+      message: 'Template atualizado com sucesso',
+      template: {
+        id: templateAtualizado.id,
+        nome: templateAtualizado.nome,
+        tipo: templateAtualizado.tipo,
+        corPrimaria: templateAtualizado.corPrimaria,
+        corSecundaria: templateAtualizado.corSecundaria,
+        corDestaque: templateAtualizado.corDestaque,
+        corFundo: templateAtualizado.corFundo,
+        corTexto: templateAtualizado.corTexto,
+        ativo: templateAtualizado.ativo === 1
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao atualizar template:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao atualizar template'
+    });
+  }
+});
+
+// API: Deletar template - PROTEGIDA
+app.delete('/api/templates/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const telefone = req.telefone;
+
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+
+    // Verifica se o template pertence ao usuário
+    const template = await prisma.template.findFirst({
+      where: { id: parseInt(id), telefone: telefoneFormatado }
+    });
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        error: 'Template não encontrado'
+      });
+    }
+
+    // Não permite deletar templates padrão
+    if (template.tipo !== 'custom') {
+      return res.status(400).json({
+        success: false,
+        error: 'Não é possível deletar templates padrão'
+      });
+    }
+
+    await prisma.template.delete({
+      where: { id: parseInt(id) }
+    });
+
+    res.json({
+      success: true,
+      message: 'Template deletado com sucesso'
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao deletar template:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao deletar template'
+    });
+  }
+});
+
+// API: Ativar template - PROTEGIDA
+app.put('/api/templates/:id/ativar', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const telefone = req.telefone;
+
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+
+    // Verifica se o template pertence ao usuário
+    const template = await prisma.template.findFirst({
+      where: { id: parseInt(id), telefone: telefoneFormatado }
+    });
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        error: 'Template não encontrado'
+      });
+    }
+
+    // Desativa todos os templates do usuário
+    await prisma.template.updateMany({
+      where: { telefone: telefoneFormatado },
+      data: { ativo: 0 }
+    });
+
+    // Ativa o template selecionado
+    await prisma.template.update({
+      where: { id: parseInt(id) },
+      data: { ativo: 1 }
+    });
+
+    // Atualiza o usuário com o template ativo
+    await prisma.usuario.update({
+      where: { telefone: telefoneFormatado },
+      data: { templateAtivoId: parseInt(id) }
+    });
+
+    res.json({
+      success: true,
+      message: 'Template ativado com sucesso',
+      template: {
+        id: template.id,
+        nome: template.nome,
+        tipo: template.tipo,
+        corPrimaria: template.corPrimaria,
+        corSecundaria: template.corSecundaria,
+        corDestaque: template.corDestaque,
+        corFundo: template.corFundo,
+        corTexto: template.corTexto,
+        ativo: true
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao ativar template:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao ativar template'
     });
   }
 });
@@ -2877,6 +3440,94 @@ function telefonesSaoIguais(telefone1: string, telefone2: string): boolean {
   return false;
 }
 
+// API: Criar novo agendamento - PROTEGIDA
+app.post('/api/agendamentos', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const telefone = req.telefone;
+    
+    if (!telefone) {
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+    
+    const { descricao, valor, dataAgendamento, tipo, categoria } = req.body;
+    
+    // Validações
+    if (!descricao || !descricao.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Descrição é obrigatória'
+      });
+    }
+    
+    if (!valor || isNaN(Number(valor)) || Number(valor) <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valor inválido'
+      });
+    }
+    
+    if (!dataAgendamento) {
+      return res.status(400).json({
+        success: false,
+        error: 'Data do agendamento é obrigatória'
+      });
+    }
+    
+    if (!tipo || !['pagamento', 'recebimento'].includes(tipo)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tipo deve ser "pagamento" ou "recebimento"'
+      });
+    }
+    
+    // Valida formato da data (YYYY-MM-DD)
+    const dataRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dataRegex.test(dataAgendamento)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Formato de data inválido. Use YYYY-MM-DD'
+      });
+    }
+    
+    // Formata o telefone
+    const telefoneFormatado = telefone.startsWith('whatsapp:') 
+      ? telefone 
+      : telefone.startsWith('+')
+      ? `whatsapp:${telefone}`
+      : `whatsapp:+${telefone}`;
+    
+    const agendamento = {
+      telefone: telefoneFormatado,
+      descricao: descricao.trim(),
+      valor: Number(valor),
+      dataAgendamento: dataAgendamento,
+      tipo: tipo,
+      categoria: categoria || 'outros',
+    };
+    
+    const id = await criarAgendamento(agendamento);
+    
+    res.json({
+      success: true,
+      message: 'Agendamento criado com sucesso',
+      agendamento: {
+        id,
+        ...agendamento,
+        status: 'pendente'
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Erro ao criar agendamento:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erro ao criar agendamento'
+    });
+  }
+});
+
 // API: Atualizar status do agendamento - PROTEGIDA
 app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
   try {
@@ -3251,4 +3902,7 @@ app.listen(PORT, async () => {
   console.log(`   👉 http://localhost:${PORT}/app`);
   console.log('');
 });
+
+// Exporta o app para uso em testes
+export { app };
 

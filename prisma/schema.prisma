@@ -48,6 +48,7 @@ model Usuario {
   trialExpiraEm   DateTime  // Data de expiração do trial (7 dias após cadastro)
   status          String    @default("trial") // "trial", "ativo", "expirado"
   assinaturaEm    DateTime? // Data da assinatura (quando assinar)
+  templateAtivoId Int?      // ID do template ativo
   criadoEm        DateTime  @default(now())
   atualizadoEm    DateTime  @updatedAt
 
@@ -89,4 +90,23 @@ model Categoria {
   @@index([telefone])
   @@index([padrao])
   @@map("categorias")
+}
+
+model Template {
+  id              Int       @id @default(autoincrement())
+  telefone        String    // Telefone do usuário
+  nome            String    // Nome do template (ex: "Dark", "Light", "Personalizado")
+  tipo            String    @default("custom") // "dark", "light", "custom"
+  corPrimaria     String    // Cor primária em hex
+  corSecundaria   String    // Cor secundária em hex
+  corDestaque     String    // Cor de destaque em hex
+  corFundo        String    // Cor de fundo em hex
+  corTexto        String    // Cor de texto em hex
+  ativo           Int       @default(0) // 0 = false, 1 = true (template ativo)
+  criadoEm        DateTime  @default(now())
+  atualizadoEm    DateTime  @updatedAt
+
+  @@index([telefone])
+  @@index([ativo])
+  @@map("templates")
 }

@@ -156,7 +156,7 @@ export async function processarMensagemComIA(mensagem: string): Promise<Transaca
     console.log('🔄 Etapa 1: Normalizando e melhorando texto...');
     console.log(`   Mensagem original: "${mensagem}"`);
     try {
-      const usarGroq = IA_PROVIDER === 'groq' || (IA_PROVIDER !== 'gemini' && temGroq);
+      const usarGroq = Boolean(IA_PROVIDER === 'groq' || (IA_PROVIDER !== 'gemini' && temGroq));
       mensagemProcessada = await normalizarTextoComIA(mensagem, usarGroq);
       
       // Se a normalização não melhorou nada, usa a original

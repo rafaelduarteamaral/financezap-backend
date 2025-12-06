@@ -35,8 +35,9 @@ export function gerarToken(telefone: string): string {
     telefone,
   };
 
-  return jwt.sign(payload, JWT_SECRET, {
-    expiresIn: JWT_EXPIRES_IN,
+  const secret: string = JWT_SECRET || 'default-secret-for-development-only';
+  return jwt.sign(payload, secret as string, {
+    expiresIn: JWT_EXPIRES_IN as string,
   });
 }
 
@@ -45,7 +46,8 @@ export function gerarToken(telefone: string): string {
  */
 export function verificarToken(token: string): JWTPayload {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload;
+    const secret: string = JWT_SECRET || 'default-secret-for-development-only';
+    const decoded = jwt.verify(token, secret as string) as unknown as JWTPayload;
     return decoded;
   } catch (error: any) {
     if (error.name === 'TokenExpiredError') {

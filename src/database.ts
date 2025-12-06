@@ -383,24 +383,44 @@ export async function buscarTransacoesComFiltros(filtros: {
       console.log(`   📞 Formatos tentados: "${telefoneLimpo}", "${semMais}", "${comMais}"`);
       console.log(`   📞 Apenas números: "${apenasNumeros}"`);
       
-      // Busca flexível: tenta com e sem +
-      telefoneConditions.push(
-        { telefone: telefoneLimpo },
-        { telefone: semMais },
-        { telefone: comMais }
-      );
+      // Busca flexível: tenta com e sem +, e com prefixo whatsapp:
+      const formatosTentados = [
+        telefoneLimpo,
+        semMais,
+        comMais,
+        `whatsapp:${telefoneLimpo}`,
+        `whatsapp:${semMais}`,
+        `whatsapp:${comMais}`
+      ];
+      
+      formatosTentados.forEach(formato => {
+        telefoneConditions.push({ telefone: formato });
+      });
+      
+      console.log(`   📞 Total de formatos tentados: ${formatosTentados.length}`);
       
       // Também tenta formatos alternativos comuns
       if (apenasNumeros.length >= 11) {
         // Formato brasileiro: +55 + DDD + número
         const ddd = apenasNumeros.substring(0, 2);
         const numero = apenasNumeros.substring(2);
-        telefoneConditions.push(
-          { telefone: `+55${ddd}${numero}` },
-          { telefone: `55${ddd}${numero}` },
-          { telefone: `${ddd}${numero}` }
-        );
+        const formatosBrasileiros = [
+          `+55${ddd}${numero}`,
+          `55${ddd}${numero}`,
+          `${ddd}${numero}`,
+          `whatsapp:+55${ddd}${numero}`,
+          `whatsapp:55${ddd}${numero}`,
+          `whatsapp:${ddd}${numero}`
+        ];
+        
+        formatosBrasileiros.forEach(formato => {
+          telefoneConditions.push({ telefone: formato });
+        });
+        
+        console.log(`   📞 Formatos brasileiros adicionados: ${formatosBrasileiros.length}`);
       }
+      
+      console.log(`   📞 Total de condições de telefone: ${telefoneConditions.length}`);
     }
 
     // Monta condições AND
@@ -408,6 +428,7 @@ export async function buscarTransacoesComFiltros(filtros: {
     
     // Adiciona filtro de telefone (busca flexível)
     if (telefoneConditions.length > 0) {
+      console.log(`   📞 Formatos de telefone que serão buscados:`, telefoneConditions.map(c => c.telefone));
       andConditions.push({ OR: telefoneConditions });
     }
     
@@ -572,6 +593,8 @@ export async function buscarTransacoesComFiltros(filtros: {
       offset: filtros.offset || 0
     });
     
+    console.log(`\n🔍 Executando query com condições:`, JSON.stringify(finalWhere, null, 2));
+    
     const transacoes = await prisma.transacao.findMany({
       where: finalWhere,
       orderBy: { dataHora: 'desc' },
@@ -580,6 +603,10 @@ export async function buscarTransacoesComFiltros(filtros: {
     });
     
     console.log(`✅ Transações retornadas do banco: ${transacoes.length}`);
+    
+    if (transacoes.length > 0) {
+      console.log(`   📋 Telefones das transações encontradas:`, transacoes.map(t => t.telefone).slice(0, 5));
+    }
     
     // Remove duplicatas por ID (caso existam)
     const transacoesUnicas = transacoes.filter((t, index, self) => 

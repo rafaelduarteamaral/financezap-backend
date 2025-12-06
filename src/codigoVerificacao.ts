@@ -1,5 +1,11 @@
 // Gerenciamento de códigos de verificação para login via WhatsApp
 
+// Importa funções do D1 (usado quando D1 está disponível)
+import {
+  salvarCodigoVerificacaoD1,
+  verificarCodigoD1
+} from './d1';
+
 interface CodigoVerificacao {
   telefone: string;
   codigo: string;
@@ -7,7 +13,19 @@ interface CodigoVerificacao {
   expiraEm: Date;
 }
 
-// Armazena códigos em memória (em produção, use Redis ou banco de dados)
+// Interface para D1Database (compatível com Cloudflare Workers)
+interface D1Database {
+  prepare(query: string): D1PreparedStatement;
+}
+
+interface D1PreparedStatement {
+  bind(...values: any[]): D1PreparedStatement;
+  first<T = any>(): Promise<T | null>;
+  all<T = any>(): Promise<{ results: T[] }>;
+  run(): Promise<{ meta: { last_row_id: number; changes: number } }>;
+}
+
+// Armazena códigos em memória (fallback para desenvolvimento local)
 const codigosVerificacao = new Map<string, CodigoVerificacao>();
 
 // Tempo de expiração do código (5 minutos)
@@ -22,11 +40,28 @@ export function gerarCodigoVerificacao(): string {
 
 /**
  * Salva um código de verificação para um telefone
+ * Se db (D1) for fornecido, salva no banco de dados; caso contrário, usa memória
  */
-export function salvarCodigoVerificacao(telefone: string, codigo: string): void {
+export async function salvarCodigoVerificacao(
+  telefone: string, 
+  codigo: string, 
+  db?: D1Database
+): Promise<void> {
   const agora = new Date();
   const expiraEm = new Date(agora.getTime() + TEMPO_EXPIRACAO_MS);
   
+  // Se D1 está disponível, usa D1
+  if (db) {
+    try {
+      await salvarCodigoVerificacaoD1(db, telefone, codigo, expiraEm);
+      return;
+    } catch (error: any) {
+      console.error('❌ Erro ao salvar código no D1, usando memória como fallback:', error.message);
+      // Continua com memória como fallback
+    }
+  }
+  
+  // Fallback: usa memória
   codigosVerificacao.set(telefone, {
     telefone,
     codigo,
@@ -39,8 +74,13 @@ export function salvarCodigoVerificacao(telefone: string, codigo: string): void 
 
 /**
  * Verifica se um código é válido para um telefone
+ * Se db (D1) for fornecido, verifica no banco de dados; caso contrário, usa memória
  */
-export function verificarCodigo(telefone: string, codigo: string): boolean {
+export async function verificarCodigo(
+  telefone: string, 
+  codigo: string, 
+  db?: D1Database
+): Promise<boolean> {
   // Normaliza o código (remove espaços e converte para string)
   const codigoNormalizado = String(codigo).trim().replace(/\s/g, '');
   
@@ -48,7 +88,20 @@ export function verificarCodigo(telefone: string, codigo: string): boolean {
   console.log(`\n🔍 DEBUG - Verificando código:`);
   console.log(`   Telefone recebido: "${telefone}"`);
   console.log(`   Código recebido: "${codigo}" (normalizado: "${codigoNormalizado}")`);
-  console.log(`   Total de códigos salvos: ${codigosVerificacao.size}`);
+  
+  // Se D1 está disponível, usa D1
+  if (db) {
+    try {
+      const resultado = await verificarCodigoD1(db, telefone, codigo);
+      return resultado;
+    } catch (error: any) {
+      console.error('❌ Erro ao verificar código no D1, usando memória como fallback:', error.message);
+      // Continua com memória como fallback
+    }
+  }
+  
+  // Fallback: usa memória
+  console.log(`   Total de códigos salvos em memória: ${codigosVerificacao.size}`);
   
   // Lista todos os telefones com códigos salvos
   if (codigosVerificacao.size > 0) {

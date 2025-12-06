@@ -1135,3 +1135,184 @@ export async function limparNotificacoesAntigasD1(db: D1Database): Promise<numbe
   
   return result.meta.changes || 0;
 }
+
+// ========== CÓDIGOS DE VERIFICAÇÃO ==========
+
+export interface CodigoVerificacaoRecord {
+  telefone: string;
+  codigo: string;
+  criadoEm: string;
+  expiraEm: string;
+}
+
+// Cria a tabela de códigos de verificação se não existir
+export async function criarTabelaCodigosVerificacao(db: D1Database): Promise<void> {
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS codigos_verificacao (
+        telefone TEXT NOT NULL PRIMARY KEY,
+        codigo TEXT NOT NULL,
+        criadoEm TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expiraEm TEXT NOT NULL
+      )
+    `).run();
+    
+    // Cria índice para limpeza de códigos expirados
+    try {
+      await db.prepare('CREATE INDEX IF NOT EXISTS idx_codigos_verificacao_expiraEm ON codigos_verificacao(expiraEm)').run();
+    } catch (e) {
+      // Índice pode já existir, ignora erro
+      console.log('   ℹ️  Índice idx_codigos_verificacao_expiraEm já existe ou erro ao criar');
+    }
+  } catch (error: any) {
+    // Se a tabela já existe, não é um erro crítico
+    if (error.message && error.message.includes('already exists')) {
+      console.log('   ℹ️  Tabela codigos_verificacao já existe');
+      return;
+    }
+    console.error('❌ Erro ao criar tabela codigos_verificacao:', error);
+    throw error;
+  }
+}
+
+// Salva um código de verificação no D1
+export async function salvarCodigoVerificacaoD1(
+  db: D1Database,
+  telefone: string,
+  codigo: string,
+  expiraEm: Date
+): Promise<void> {
+  await criarTabelaCodigosVerificacao(db);
+  
+  // Remove código antigo se existir (upsert)
+  await db
+    .prepare('DELETE FROM codigos_verificacao WHERE telefone = ?')
+    .bind(telefone)
+    .run();
+  
+  // Insere novo código
+  await db
+    .prepare('INSERT INTO codigos_verificacao (telefone, codigo, criadoEm, expiraEm) VALUES (?, ?, CURRENT_TIMESTAMP, ?)')
+    .bind(telefone, codigo, expiraEm.toISOString())
+    .run();
+  
+  console.log(`✅ D1: Código de verificação salvo para ${telefone}: ${codigo} (expira em ${expiraEm.toLocaleString('pt-BR')})`);
+}
+
+// Busca um código de verificação no D1
+export async function buscarCodigoVerificacaoD1(
+  db: D1Database,
+  telefone: string
+): Promise<CodigoVerificacaoRecord | null> {
+  await criarTabelaCodigosVerificacao(db);
+  
+  const result = await db
+    .prepare('SELECT * FROM codigos_verificacao WHERE telefone = ?')
+    .bind(telefone)
+    .first<CodigoVerificacaoRecord>();
+  
+  return result || null;
+}
+
+// Verifica e remove um código de verificação do D1
+export async function verificarCodigoD1(
+  db: D1Database,
+  telefone: string,
+  codigo: string
+): Promise<boolean> {
+  await criarTabelaCodigosVerificacao(db);
+  
+  const codigoSalvo = await buscarCodigoVerificacaoD1(db, telefone);
+  
+  if (!codigoSalvo) {
+    // Tenta buscar com variações do telefone
+    const telefoneSemWhatsapp = telefone.replace('whatsapp:', '');
+    const telefoneComWhatsapp = telefone.startsWith('whatsapp:') ? telefone : `whatsapp:${telefone}`;
+    const telefoneSemMais = telefone.replace(/\+/g, '');
+    
+    const variacoes = [telefoneSemWhatsapp, telefoneComWhatsapp, telefoneSemMais];
+    for (const variacao of variacoes) {
+      const codigoVariacao = await buscarCodigoVerificacaoD1(db, variacao);
+      if (codigoVariacao) {
+        // Move o código para o formato correto
+        await db
+          .prepare('UPDATE codigos_verificacao SET telefone = ? WHERE telefone = ?')
+          .bind(telefone, variacao)
+          .run();
+        
+        // Continua a verificação
+        const codigoSalvoCorrigido = await buscarCodigoVerificacaoD1(db, telefone);
+        if (!codigoSalvoCorrigido) return false;
+        
+        // Verifica se expirou
+        if (new Date() > new Date(codigoSalvoCorrigido.expiraEm)) {
+          await db
+            .prepare('DELETE FROM codigos_verificacao WHERE telefone = ?')
+            .bind(telefone)
+            .run();
+          console.log(`❌ Código expirado para ${telefone}`);
+          return false;
+        }
+        
+        // Verifica se o código está correto
+        const codigoNormalizado = String(codigo).trim().replace(/\s/g, '');
+        if (codigoSalvoCorrigido.codigo !== codigoNormalizado) {
+          console.log(`❌ Código incorreto para ${telefone}. Esperado: "${codigoSalvoCorrigido.codigo}", Recebido: "${codigoNormalizado}"`);
+          return false;
+        }
+        
+        // Código válido - remove
+        await db
+          .prepare('DELETE FROM codigos_verificacao WHERE telefone = ?')
+          .bind(telefone)
+          .run();
+        console.log(`✅ Código verificado com sucesso para ${telefone}`);
+        return true;
+      }
+    }
+    
+    console.log(`❌ Nenhum código encontrado para "${telefone}"`);
+    return false;
+  }
+  
+  // Verifica se expirou
+  if (new Date() > new Date(codigoSalvo.expiraEm)) {
+    await db
+      .prepare('DELETE FROM codigos_verificacao WHERE telefone = ?')
+      .bind(telefone)
+      .run();
+    console.log(`❌ Código expirado para ${telefone}`);
+    return false;
+  }
+  
+  // Verifica se o código está correto
+  const codigoNormalizado = String(codigo).trim().replace(/\s/g, '');
+  if (codigoSalvo.codigo !== codigoNormalizado) {
+    console.log(`❌ Código incorreto para ${telefone}. Esperado: "${codigoSalvo.codigo}", Recebido: "${codigoNormalizado}"`);
+    return false;
+  }
+  
+  // Código válido - remove
+  await db
+    .prepare('DELETE FROM codigos_verificacao WHERE telefone = ?')
+    .bind(telefone)
+    .run();
+  console.log(`✅ Código verificado com sucesso para ${telefone}`);
+  return true;
+}
+
+// Remove códigos expirados (limpeza periódica)
+export async function limparCodigosExpiradosD1(db: D1Database): Promise<number> {
+  await criarTabelaCodigosVerificacao(db);
+  
+  const result = await db
+    .prepare('DELETE FROM codigos_verificacao WHERE expiraEm < CURRENT_TIMESTAMP')
+    .run();
+  
+  const removidos = result.meta.changes || 0;
+  if (removidos > 0) {
+    console.log(`🧹 D1: ${removidos} código(s) expirado(s) removido(s)`);
+  }
+  
+  return removidos;
+}
