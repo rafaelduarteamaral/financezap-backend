@@ -30,6 +30,8 @@ jest.mock('../src/database', () => ({
 jest.mock('../src/carteiras', () => ({
   buscarCarteiraPadrao: jest.fn(),
   buscarCarteiraPorId: jest.fn(),
+  buscarCarteirasPorTelefone: jest.fn(),
+  criarCarteira: jest.fn(),
 }));
 
 // Mock de autenticação
@@ -103,6 +105,7 @@ describe('API de Transações', () => {
             metodo: 'debito',
             dataHora: '2024-01-01 10:00:00',
             data: '2024-01-01',
+            carteiraId: 1,
           },
         ],
         total: 1,

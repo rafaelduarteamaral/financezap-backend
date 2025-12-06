@@ -1099,6 +1099,27 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
             // Atualiza status para pago
             await atualizarStatusAgendamento(agendamento.id, 'pago');
             
+            // Busca ou cria carteira padrão antes de criar a transação
+            const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
+              ? cleanFromNumber 
+              : cleanFromNumber.startsWith('+')
+              ? `whatsapp:${cleanFromNumber}`
+              : `whatsapp:+${cleanFromNumber}`;
+            
+            let carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
+            
+            // Se não houver carteira padrão, cria uma automaticamente
+            if (!carteiraPadrao) {
+              console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
+              carteiraPadrao = await criarCarteira(
+                telefoneFormatado,
+                'Carteira Principal',
+                'Carteira padrão criada automaticamente',
+                true // Define como padrão
+              );
+              console.log(`✅ Carteira padrão criada automaticamente: ID ${carteiraPadrao.id}`);
+            }
+            
             // Cria transação automaticamente
             const dataAtual = new Date().toISOString().split('T')[0];
             const transacao: Transacao = {
@@ -1110,7 +1131,8 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               metodo: 'debito',
               dataHora: new Date().toLocaleString('pt-BR'),
               data: dataAtual,
-              mensagemOriginal: messageText
+              mensagemOriginal: messageText,
+              carteiraId: carteiraPadrao.id
             };
             
             await salvarTransacao(transacao);
@@ -1155,6 +1177,41 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
         if (transacoesExtraidas.length > 0) {
           console.log(`✅ ${transacoesExtraidas.length} transação(ões) encontrada(s)!`);
           
+          // Busca ou cria carteira padrão antes de salvar transações
+          const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
+            ? cleanFromNumber 
+            : cleanFromNumber.startsWith('+')
+            ? `whatsapp:${cleanFromNumber}`
+            : `whatsapp:+${cleanFromNumber}`;
+          
+          let carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
+          
+          // Se não houver carteira padrão, cria uma automaticamente
+          if (!carteiraPadrao) {
+            console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
+            carteiraPadrao = await criarCarteira(
+              telefoneFormatado,
+              'Carteira Principal',
+              'Carteira padrão criada automaticamente',
+              true // Define como padrão
+            );
+            console.log(`✅ Carteira padrão criada automaticamente: ID ${carteiraPadrao.id}`);
+          }
+          
+          // Se a IA extraiu um nome de carteira, tenta encontrar a carteira correspondente
+          let carteiraIdParaTransacao = carteiraPadrao.id;
+          if (transacoesExtraidas[0]?.carteiraNome) {
+            const carteirasUsuario = await buscarCarteirasPorTelefone(telefoneFormatado);
+            const carteiraEncontrada = carteirasUsuario.find(c => 
+              c.nome.toLowerCase().includes(transacoesExtraidas[0].carteiraNome!.toLowerCase()) ||
+              transacoesExtraidas[0].carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
+            );
+            if (carteiraEncontrada) {
+              carteiraIdParaTransacao = carteiraEncontrada.id;
+              console.log(`   📦 Carteira específica encontrada: "${carteiraEncontrada.nome}" (ID: ${carteiraEncontrada.id})`);
+            }
+          }
+          
           // Salva cada transação no banco de dados
           for (const transacaoExtraida of transacoesExtraidas) {
             if (transacaoExtraida.sucesso) {
@@ -1175,11 +1232,13 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                   metodo: transacaoExtraida.metodo || 'debito',
                   dataHora: new Date().toLocaleString('pt-BR'),
                   data: dataAtual,
-                  mensagemOriginal: messageText
+                  mensagemOriginal: messageText,
+                  carteiraId: carteiraIdParaTransacao
                 };
                 
                 // Log do tipo antes de salvar
                 console.log(`   🔍 Tipo extraído pela IA: "${transacaoExtraida.tipo}" -> Tipo final: "${tipoFinal}" (será salvo como: "${transacao.tipo}")`);
+                console.log(`   💼 Carteira: ID ${carteiraIdParaTransacao}`);
                 
                 const id = await salvarTransacao(transacao);
                 console.log(`   💾 Transação salva (ID: ${id}):`);
@@ -1564,8 +1623,8 @@ app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (
       ? `whatsapp:${telefone}`
       : `whatsapp:+${telefone}`;
     
-    // Busca carteira padrão se não foi informada
-    let carteiraIdFinal: number | null = null;
+    // Busca ou cria carteira padrão se não foi informada
+    let carteiraIdFinal: number;
     if (carteiraId) {
       // Valida se a carteira pertence ao usuário
       const carteira = await buscarCarteiraPorId(Number(carteiraId), telefoneFormatado);
@@ -1578,11 +1637,21 @@ app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (
       carteiraIdFinal = carteira.id;
     } else {
       // Busca carteira padrão
-      const carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
-      if (carteiraPadrao) {
-        carteiraIdFinal = carteiraPadrao.id;
+      let carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
+      
+      // Se não houver carteira padrão, cria uma automaticamente
+      if (!carteiraPadrao) {
+        console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
+        carteiraPadrao = await criarCarteira(
+          telefoneFormatado,
+          'Carteira Principal',
+          'Carteira padrão criada automaticamente',
+          true // Define como padrão
+        );
+        console.log(`✅ Carteira padrão criada: ID ${carteiraPadrao.id}`);
       }
-      // Se não houver carteira padrão, deixa null (compatibilidade com dados antigos)
+      
+      carteiraIdFinal = carteiraPadrao.id;
     }
     
     // Prepara dados da transação

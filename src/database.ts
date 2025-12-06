@@ -26,6 +26,31 @@ export async function salvarTransacao(transacao: Transacao): Promise<number> {
   try {
     const dataApenas = transacao.data || (transacao.dataHora ? transacao.dataHora.split(' ')[0] : new Date().toISOString().split('T')[0]);
     
+    // Garante que a transação tenha uma carteira
+    let carteiraIdFinal = transacao.carteiraId;
+    
+    if (!carteiraIdFinal) {
+      // Importa funções de carteiras dinamicamente para evitar dependência circular
+      const { buscarCarteiraPadrao, criarCarteira } = await import('./carteiras');
+      
+      // Busca carteira padrão
+      let carteiraPadrao = await buscarCarteiraPadrao(transacao.telefone);
+      
+      // Se não houver carteira padrão, cria uma automaticamente
+      if (!carteiraPadrao) {
+        console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
+        carteiraPadrao = await criarCarteira(
+          transacao.telefone,
+          'Carteira Principal',
+          'Carteira padrão criada automaticamente',
+          true // Define como padrão
+        );
+        console.log(`✅ Carteira padrão criada automaticamente: ID ${carteiraPadrao.id}`);
+      }
+      
+      carteiraIdFinal = carteiraPadrao.id;
+    }
+    
     const result = await prisma.transacao.create({
       data: {
         telefone: transacao.telefone,
@@ -37,7 +62,7 @@ export async function salvarTransacao(transacao: Transacao): Promise<number> {
         dataHora: transacao.dataHora,
         data: dataApenas,
         mensagemOriginal: transacao.mensagemOriginal || null,
-        carteiraId: transacao.carteiraId || null,
+        carteiraId: carteiraIdFinal, // Sempre terá um valor
       },
     });
     
