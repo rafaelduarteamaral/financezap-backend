@@ -25,6 +25,18 @@ import {
   buscarNotificacoesNaoLidasD1,
   marcarNotificacoesComoLidasD1,
   excluirTodosDadosUsuario,
+  buscarTemplatesD1,
+  criarTemplateD1,
+  atualizarTemplateD1,
+  removerTemplateD1,
+  ativarTemplateD1,
+  buscarCarteirasD1,
+  buscarCarteiraPorIdD1,
+  buscarCarteiraPadraoD1,
+  criarCarteiraD1,
+  atualizarCarteiraD1,
+  removerCarteiraD1,
+  definirCarteiraPadraoD1,
 } from './d1';
 import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from './codigoVerificacao';
 import jwt from '@tsndr/cloudflare-worker-jwt';
@@ -2035,6 +2047,461 @@ app.delete('/api/categorias/:id', async (c) => {
     // }, c.env.financezap_db);
     
     return c.json({ success: true, message: 'Categoria removida com sucesso' });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ========== ENDPOINTS DE TEMPLATES ==========
+
+app.get('/api/templates', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const templates = await buscarTemplatesD1(c.env.financezap_db, telefoneFormatado);
+    
+    return c.json({
+      success: true,
+      templates: templates.map(t => ({
+        id: t.id,
+        nome: t.nome,
+        tipo: t.tipo,
+        corPrimaria: t.corPrimaria,
+        corSecundaria: t.corSecundaria,
+        corDestaque: t.corDestaque,
+        corFundo: t.corFundo,
+        corTexto: t.corTexto,
+        ativo: t.ativo === 1,
+        criadoEm: t.criadoEm
+      }))
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.post('/api/templates', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const body = await c.req.json();
+    const { nome, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto } = body;
+    
+    if (!nome || !nome.trim()) {
+      return c.json({ success: false, error: 'Nome do template é obrigatório' }, 400);
+    }
+    
+    const id = await criarTemplateD1(c.env.financezap_db, telefoneFormatado, {
+      nome: nome.trim(),
+      corPrimaria,
+      corSecundaria,
+      corDestaque,
+      corFundo,
+      corTexto,
+    });
+    
+    const templates = await buscarTemplatesD1(c.env.financezap_db, telefoneFormatado);
+    const template = templates.find(t => t.id === id);
+    
+    return c.json({
+      success: true,
+      message: 'Template criado com sucesso',
+      template: template ? {
+        id: template.id,
+        nome: template.nome,
+        tipo: template.tipo,
+        corPrimaria: template.corPrimaria,
+        corSecundaria: template.corSecundaria,
+        corDestaque: template.corDestaque,
+        corFundo: template.corFundo,
+        corTexto: template.corTexto,
+        ativo: template.ativo === 1
+      } : null
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.put('/api/templates/:id', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    const body = await c.req.json();
+    const { nome, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto } = body;
+    
+    await atualizarTemplateD1(c.env.financezap_db, id, telefoneFormatado, {
+      nome,
+      corPrimaria,
+      corSecundaria,
+      corDestaque,
+      corFundo,
+      corTexto,
+    });
+    
+    const templates = await buscarTemplatesD1(c.env.financezap_db, telefoneFormatado);
+    const template = templates.find(t => t.id === id);
+    
+    return c.json({
+      success: true,
+      message: 'Template atualizado com sucesso',
+      template: template ? {
+        id: template.id,
+        nome: template.nome,
+        tipo: template.tipo,
+        corPrimaria: template.corPrimaria,
+        corSecundaria: template.corSecundaria,
+        corDestaque: template.corDestaque,
+        corFundo: template.corFundo,
+        corTexto: template.corTexto,
+        ativo: template.ativo === 1
+      } : null
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.delete('/api/templates/:id', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    
+    await removerTemplateD1(c.env.financezap_db, id, telefoneFormatado);
+    
+    return c.json({ success: true, message: 'Template deletado com sucesso' });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.put('/api/templates/:id/ativar', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    
+    await ativarTemplateD1(c.env.financezap_db, id, telefoneFormatado);
+    
+    const templates = await buscarTemplatesD1(c.env.financezap_db, telefoneFormatado);
+    const template = templates.find(t => t.id === id);
+    
+    return c.json({
+      success: true,
+      message: 'Template ativado com sucesso',
+      template: template ? {
+        id: template.id,
+        nome: template.nome,
+        tipo: template.tipo,
+        corPrimaria: template.corPrimaria,
+        corSecundaria: template.corSecundaria,
+        corDestaque: template.corDestaque,
+        corFundo: template.corFundo,
+        corTexto: template.corTexto,
+        ativo: template.ativo === 1
+      } : null
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ========== ENDPOINTS DE CARTEIRAS ==========
+
+app.get('/api/carteiras', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    // Debug: verifica se a tabela existe
+    try {
+      const testQuery = await c.env.financezap_db
+        .prepare('SELECT COUNT(*) as count FROM carteiras')
+        .first<{ count: number }>();
+      console.log(`🔍 Debug GET /api/carteiras: Tabela existe, total: ${testQuery?.count || 0}`);
+    } catch (testError: any) {
+      console.error('❌ Erro ao testar tabela carteiras:', testError.message);
+      return c.json({ 
+        success: false, 
+        error: `Erro ao acessar banco: ${testError.message}. Verifique se a tabela existe.` 
+      }, 500);
+    }
+    
+    const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+    
+    return c.json({
+      success: true,
+      carteiras: carteiras.map(cart => ({
+        id: cart.id,
+        telefone: cart.telefone,
+        nome: cart.nome,
+        descricao: cart.descricao,
+        padrao: cart.padrao === 1,
+        ativo: cart.ativo === 1,
+        criadoEm: cart.criadoEm,
+        atualizadoEm: cart.atualizadoEm
+      }))
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.post('/api/carteiras', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const body = await c.req.json();
+    const { nome, descricao, padrao } = body;
+    
+    if (!nome || !nome.trim()) {
+      return c.json({ success: false, error: 'Nome da carteira é obrigatório' }, 400);
+    }
+    
+    const id = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
+      nome: nome.trim(),
+      descricao: descricao?.trim(),
+      padrao: padrao === true,
+    });
+    
+    const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+    const carteira = carteiras.find(c => c.id === id);
+    
+    return c.json({
+      success: true,
+      message: 'Carteira criada com sucesso',
+      carteira: carteira ? {
+        id: carteira.id,
+        telefone: carteira.telefone,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1
+      } : null
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.put('/api/carteiras/:id', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    const body = await c.req.json();
+    const { nome, descricao, padrao, ativo } = body;
+    
+    await atualizarCarteiraD1(c.env.financezap_db, id, telefoneFormatado, {
+      nome,
+      descricao,
+      padrao,
+      ativo,
+    });
+    
+    const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+    const carteira = carteiras.find(c => c.id === id);
+    
+    return c.json({
+      success: true,
+      message: 'Carteira atualizada com sucesso',
+      carteira: carteira ? {
+        id: carteira.id,
+        telefone: carteira.telefone,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1
+      } : null
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.delete('/api/carteiras/:id', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    
+    // Debug: verifica se o banco está acessível
+    try {
+      const testQuery = await c.env.financezap_db
+        .prepare('SELECT COUNT(*) as count FROM carteiras')
+        .first<{ count: number }>();
+      console.log(`🔍 Debug: Tabela carteiras existe, total de registros: ${testQuery?.count || 0}`);
+    } catch (testError: any) {
+      console.error('❌ Erro ao testar acesso à tabela carteiras:', testError.message);
+      return c.json({ 
+        success: false, 
+        error: `Erro ao acessar banco de dados: ${testError.message}. A tabela pode não existir ainda.` 
+      }, 500);
+    }
+    
+    await removerCarteiraD1(c.env.financezap_db, id, telefoneFormatado);
+    
+    return c.json({ success: true, message: 'Carteira removida com sucesso' });
+  } catch (error: any) {
+    console.error('❌ Erro ao remover carteira:', error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.post('/api/carteiras/:id/padrao', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    
+    await definirCarteiraPadraoD1(c.env.financezap_db, id, telefoneFormatado);
+    
+    const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+    const carteira = carteiras.find(c => c.id === id);
+    
+    return c.json({
+      success: true,
+      message: 'Carteira definida como padrão com sucesso',
+      carteira: carteira ? {
+        id: carteira.id,
+        telefone: carteira.telefone,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1
+      } : null
+    });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }

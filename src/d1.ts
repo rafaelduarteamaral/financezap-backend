@@ -1347,3 +1347,626 @@ export async function limparCodigosExpiradosD1(db: D1Database): Promise<number> 
   
   return removidos;
 }
+
+// ========== TEMPLATES ==========
+
+export interface TemplateRecord {
+  id?: number;
+  telefone: string;
+  nome: string;
+  tipo: string; // 'dark', 'light', 'custom'
+  corPrimaria: string;
+  corSecundaria: string;
+  corDestaque: string;
+  corFundo: string;
+  corTexto: string;
+  ativo: number; // 0 = false, 1 = true
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+// Cria templates padrão se não existirem
+export async function criarTemplatesPadraoD1(
+  db: D1Database,
+  telefone: string
+): Promise<void> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    const preferida = variacoes[0];
+    
+    // Verifica se já existem templates para este usuário
+    const templatesExistentes = await db
+      .prepare('SELECT id FROM templates WHERE telefone = ?')
+      .bind(preferida)
+      .all<TemplateRecord>();
+    
+    if (templatesExistentes.results && templatesExistentes.results.length > 0) {
+      return; // Já existem templates
+    }
+  } catch (error: any) {
+    // Se a tabela não existir, ignora o erro (será criada depois)
+    if (error.message && error.message.includes('no such table')) {
+      console.warn('⚠️ Tabela templates ainda não existe, será criada automaticamente');
+      return;
+    }
+    throw error;
+  }
+  
+  const variacoes = telefoneVariacoes(telefone);
+  const preferida = variacoes[0];
+  
+  // Template Dark
+  await db
+    .prepare(`
+      INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
+      VALUES (?, 'Dark', 'dark', '#3B82F6', '#8B5CF6', '#10B981', '#1E293B', '#F1F5F9', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    .bind(preferida)
+    .run();
+  
+  // Template Light
+  const resultLight = await db
+    .prepare(`
+      INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
+      VALUES (?, 'Light', 'light', '#3B82F6', '#8B5CF6', '#10B981', '#F9FAFB', '#111827', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    .bind(preferida)
+    .run();
+  
+  const templateLightId = Number(resultLight.meta.last_row_id);
+  
+  // Atualiza o usuário com o template ativo
+  await db
+    .prepare('UPDATE usuarios SET templateAtivoId = ? WHERE telefone = ?')
+    .bind(templateLightId, preferida)
+    .run();
+  
+  console.log(`✅ Templates padrão criados para: ${preferida}`);
+}
+
+export async function buscarTemplatesD1(
+  db: D1Database,
+  telefone: string
+): Promise<TemplateRecord[]> {
+  // Garante que os templates padrão existem
+  await criarTemplatesPadraoD1(db, telefone);
+  
+  const variacoes = telefoneVariacoes(telefone);
+  
+  const templates = await db
+    .prepare(`
+      SELECT * FROM templates 
+      WHERE telefone IN (${variacoes.map(() => '?').join(',')})
+      ORDER BY ativo DESC, tipo ASC, criadoEm ASC
+    `)
+    .bind(...variacoes)
+    .all<TemplateRecord>();
+  
+  return templates.results || [];
+}
+
+export async function criarTemplateD1(
+  db: D1Database,
+  telefone: string,
+  dados: {
+    nome: string;
+    corPrimaria: string;
+    corSecundaria: string;
+    corDestaque: string;
+    corFundo: string;
+    corTexto: string;
+  }
+): Promise<number> {
+  const variacoes = telefoneVariacoes(telefone);
+  const preferida = variacoes[0];
+  
+  // Valida formato hex das cores
+  const hexRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+  const cores = [dados.corPrimaria, dados.corSecundaria, dados.corDestaque, dados.corFundo, dados.corTexto];
+  for (const cor of cores) {
+    if (!cor || !hexRegex.test(cor)) {
+      throw new Error('Todas as cores devem estar no formato hexadecimal (ex: #3B82F6)');
+    }
+  }
+  
+  const result = await db
+    .prepare(`
+      INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
+      VALUES (?, ?, 'custom', ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    .bind(
+      preferida,
+      dados.nome.trim(),
+      dados.corPrimaria,
+      dados.corSecundaria,
+      dados.corDestaque,
+      dados.corFundo,
+      dados.corTexto
+    )
+    .run();
+  
+  return Number(result.meta.last_row_id);
+}
+
+export async function atualizarTemplateD1(
+  db: D1Database,
+  id: number,
+  telefone: string,
+  dados: {
+    nome?: string;
+    corPrimaria?: string;
+    corSecundaria?: string;
+    corDestaque?: string;
+    corFundo?: string;
+    corTexto?: string;
+  }
+): Promise<boolean> {
+  const template = await db
+    .prepare('SELECT * FROM templates WHERE id = ?')
+    .bind(id)
+    .first<TemplateRecord>();
+  
+  if (!template) {
+    throw new Error('Template não encontrado');
+  }
+  
+  // Não permite editar templates padrão (dark e light)
+  if (template.tipo !== 'custom') {
+    throw new Error('Não é possível editar templates padrão');
+  }
+  
+  // Verifica se o template pertence ao usuário
+  const variacoes = telefoneVariacoes(telefone);
+  const telefoneCorresponde = variacoes.includes(template.telefone);
+  
+  if (!telefoneCorresponde) {
+    throw new Error('Você não tem permissão para atualizar este template');
+  }
+  
+  const updates: string[] = [];
+  const params: Array<string> = [];
+  
+  // Valida formato hex das cores se fornecidas
+  const hexRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+  
+  if (dados.nome !== undefined) {
+    updates.push('nome = ?');
+    params.push(dados.nome.trim());
+  }
+  if (dados.corPrimaria !== undefined) {
+    if (!hexRegex.test(dados.corPrimaria)) {
+      throw new Error('Cor primária deve estar no formato hexadecimal');
+    }
+    updates.push('corPrimaria = ?');
+    params.push(dados.corPrimaria);
+  }
+  if (dados.corSecundaria !== undefined) {
+    if (!hexRegex.test(dados.corSecundaria)) {
+      throw new Error('Cor secundária deve estar no formato hexadecimal');
+    }
+    updates.push('corSecundaria = ?');
+    params.push(dados.corSecundaria);
+  }
+  if (dados.corDestaque !== undefined) {
+    if (!hexRegex.test(dados.corDestaque)) {
+      throw new Error('Cor de destaque deve estar no formato hexadecimal');
+    }
+    updates.push('corDestaque = ?');
+    params.push(dados.corDestaque);
+  }
+  if (dados.corFundo !== undefined) {
+    if (!hexRegex.test(dados.corFundo)) {
+      throw new Error('Cor de fundo deve estar no formato hexadecimal');
+    }
+    updates.push('corFundo = ?');
+    params.push(dados.corFundo);
+  }
+  if (dados.corTexto !== undefined) {
+    if (!hexRegex.test(dados.corTexto)) {
+      throw new Error('Cor de texto deve estar no formato hexadecimal');
+    }
+    updates.push('corTexto = ?');
+    params.push(dados.corTexto);
+  }
+  
+  if (updates.length === 0) return false;
+  
+  updates.push('atualizadoEm = CURRENT_TIMESTAMP');
+  
+  await db
+    .prepare(`UPDATE templates SET ${updates.join(', ')} WHERE id = ?`)
+    .bind(...params, id)
+    .run();
+  
+  return true;
+}
+
+export async function removerTemplateD1(
+  db: D1Database,
+  id: number,
+  telefone: string
+): Promise<boolean> {
+  const template = await db
+    .prepare('SELECT * FROM templates WHERE id = ?')
+    .bind(id)
+    .first<TemplateRecord>();
+  
+  if (!template) {
+    throw new Error('Template não encontrado');
+  }
+  
+  // Não permite deletar templates padrão
+  if (template.tipo !== 'custom') {
+    throw new Error('Não é possível deletar templates padrão');
+  }
+  
+  // Verifica se o template pertence ao usuário
+  const variacoes = telefoneVariacoes(telefone);
+  const telefoneCorresponde = variacoes.includes(template.telefone);
+  
+  if (!telefoneCorresponde) {
+    throw new Error('Você não tem permissão para remover este template');
+  }
+  
+  const result = await db
+    .prepare('DELETE FROM templates WHERE id = ?')
+    .bind(id)
+    .run();
+  
+  return (result.meta.changes || 0) > 0;
+}
+
+export async function ativarTemplateD1(
+  db: D1Database,
+  id: number,
+  telefone: string
+): Promise<boolean> {
+  try {
+    const template = await db
+      .prepare('SELECT * FROM templates WHERE id = ?')
+      .bind(id)
+      .first<TemplateRecord>();
+    
+    if (!template) {
+      throw new Error('Template não encontrado');
+    }
+    
+    // Verifica se o template pertence ao usuário
+    const variacoes = telefoneVariacoes(telefone);
+    const telefoneCorresponde = variacoes.includes(template.telefone);
+    
+    if (!telefoneCorresponde) {
+      throw new Error('Você não tem permissão para ativar este template');
+    }
+    
+    // Desativa todos os templates do usuário
+    await db
+      .prepare(`UPDATE templates SET ativo = 0 WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(...variacoes)
+      .run();
+    
+    // Ativa o template selecionado
+    await db
+      .prepare('UPDATE templates SET ativo = 1 WHERE id = ?')
+      .bind(id)
+      .run();
+    
+    // Atualiza o usuário com o template ativo
+    await db
+      .prepare(`UPDATE usuarios SET templateAtivoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(id, ...variacoes)
+      .run();
+    
+    return true;
+  } catch (error: any) {
+    console.error('❌ Erro ao ativar template:', error);
+    if (error.message && error.message.includes('no such table')) {
+      throw new Error('Tabela templates não existe no banco de dados. Por favor, aguarde alguns minutos para a propagação.');
+    }
+    throw error;
+  }
+}
+
+// ========== CARTEIRAS ==========
+
+export interface CarteiraRecord {
+  id?: number;
+  telefone: string;
+  nome: string;
+  descricao?: string | null;
+  padrao: number; // 0 = false, 1 = true
+  ativo: number; // 0 = false, 1 = true
+  criadoEm: string;
+  atualizadoEm: string;
+}
+
+export async function buscarCarteirasD1(
+  db: D1Database,
+  telefone: string
+): Promise<CarteiraRecord[]> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    
+    const carteiras = await db
+      .prepare(`
+        SELECT * FROM carteiras 
+        WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND ativo = 1
+        ORDER BY padrao DESC, criadoEm ASC
+      `)
+      .bind(...variacoes)
+      .all<CarteiraRecord>();
+    
+    return carteiras.results || [];
+  } catch (error: any) {
+    console.error('❌ Erro ao buscar carteiras:', error);
+    // Se a tabela não existir, retorna array vazio em vez de lançar erro
+    if (error.message && error.message.includes('no such table')) {
+      console.warn('⚠️ Tabela carteiras não existe ainda, retornando array vazio');
+      return [];
+    }
+    throw error;
+  }
+}
+
+export async function buscarCarteiraPorIdD1(
+  db: D1Database,
+  id: number,
+  telefone: string
+): Promise<CarteiraRecord | null> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    
+    for (const variacao of variacoes) {
+      const carteira = await db
+        .prepare('SELECT * FROM carteiras WHERE id = ? AND telefone = ? AND ativo = 1')
+        .bind(id, variacao)
+        .first<CarteiraRecord>();
+      
+      if (carteira) return carteira;
+    }
+    
+    return null;
+  } catch (error: any) {
+    console.error('❌ Erro ao buscar carteira por ID:', error);
+    if (error.message && error.message.includes('no such table')) {
+      throw new Error('Tabela carteiras não existe no banco de dados. Por favor, aguarde alguns minutos para a propagação.');
+    }
+    throw error;
+  }
+}
+
+export async function buscarCarteiraPadraoD1(
+  db: D1Database,
+  telefone: string
+): Promise<CarteiraRecord | null> {
+  const variacoes = telefoneVariacoes(telefone);
+  const preferida = variacoes[0];
+  
+  // Primeiro tenta buscar pela carteira padrão do usuário
+  const usuario = await db
+    .prepare('SELECT carteiraPadraoId FROM usuarios WHERE telefone = ?')
+    .bind(preferida)
+    .first<{ carteiraPadraoId: number | null }>();
+  
+  if (usuario?.carteiraPadraoId) {
+    const carteira = await buscarCarteiraPorIdD1(db, usuario.carteiraPadraoId, telefone);
+    if (carteira) return carteira;
+  }
+  
+  // Se não encontrou, busca pela primeira carteira marcada como padrão
+  for (const variacao of variacoes) {
+    const carteiraPadrao = await db
+      .prepare('SELECT * FROM carteiras WHERE telefone = ? AND padrao = 1 AND ativo = 1 LIMIT 1')
+      .bind(variacao)
+      .first<CarteiraRecord>();
+    
+    if (carteiraPadrao) return carteiraPadrao;
+  }
+  
+  // Se não encontrou, retorna a primeira carteira ativa
+  for (const variacao of variacoes) {
+    const carteira = await db
+      .prepare('SELECT * FROM carteiras WHERE telefone = ? AND ativo = 1 ORDER BY criadoEm ASC LIMIT 1')
+      .bind(variacao)
+      .first<CarteiraRecord>();
+    
+    if (carteira) return carteira;
+  }
+  
+  return null;
+}
+
+export async function criarCarteiraD1(
+  db: D1Database,
+  telefone: string,
+  dados: {
+    nome: string;
+    descricao?: string;
+    padrao?: boolean;
+  }
+): Promise<number> {
+  const variacoes = telefoneVariacoes(telefone);
+  const preferida = variacoes[0];
+  
+  // Se está marcando como padrão, remove o padrão das outras
+  if (dados.padrao === true) {
+    await db
+      .prepare(`UPDATE carteiras SET padrao = 0 WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(...variacoes)
+      .run();
+    
+    await db
+      .prepare(`UPDATE usuarios SET carteiraPadraoId = NULL WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(...variacoes)
+      .run();
+  }
+  
+  const result = await db
+    .prepare(`
+      INSERT INTO carteiras (telefone, nome, descricao, padrao, ativo, criadoEm, atualizadoEm)
+      VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    .bind(
+      preferida,
+      dados.nome.trim(),
+      dados.descricao?.trim() || null,
+      dados.padrao === true ? 1 : 0
+    )
+    .run();
+  
+  const carteiraId = Number(result.meta.last_row_id);
+  
+  // Se é padrão, atualiza o usuário
+  if (dados.padrao === true) {
+    await db
+      .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(carteiraId, ...variacoes)
+      .run();
+  }
+  
+  return carteiraId;
+}
+
+export async function atualizarCarteiraD1(
+  db: D1Database,
+  id: number,
+  telefone: string,
+  dados: {
+    nome?: string;
+    descricao?: string;
+    padrao?: boolean;
+    ativo?: boolean;
+  }
+): Promise<boolean> {
+  const carteira = await buscarCarteiraPorIdD1(db, id, telefone);
+  if (!carteira) {
+    throw new Error('Carteira não encontrada');
+  }
+  
+  // Se está marcando como padrão, remove o padrão das outras
+  if (dados.padrao === true) {
+    const variacoes = telefoneVariacoes(telefone);
+    await db
+      .prepare(`UPDATE carteiras SET padrao = 0 WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND id != ?`)
+      .bind(...variacoes, id)
+      .run();
+    
+    await db
+      .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(id, ...variacoes)
+      .run();
+  }
+  
+  const updates: string[] = [];
+  const params: Array<string | number | null> = [];
+  
+  if (dados.nome !== undefined) {
+    updates.push('nome = ?');
+    params.push(dados.nome.trim());
+  }
+  if (dados.descricao !== undefined) {
+    updates.push('descricao = ?');
+    params.push(dados.descricao?.trim() || null);
+  }
+  if (dados.padrao !== undefined) {
+    updates.push('padrao = ?');
+    params.push(dados.padrao ? 1 : 0);
+  }
+  if (dados.ativo !== undefined) {
+    updates.push('ativo = ?');
+    params.push(dados.ativo ? 1 : 0);
+  }
+  
+  if (updates.length === 0) return false;
+  
+  updates.push('atualizadoEm = CURRENT_TIMESTAMP');
+  
+  await db
+    .prepare(`UPDATE carteiras SET ${updates.join(', ')} WHERE id = ?`)
+    .bind(...params, id)
+    .run();
+  
+  return true;
+}
+
+export async function removerCarteiraD1(
+  db: D1Database,
+  id: number,
+  telefone: string
+): Promise<boolean> {
+  try {
+    const carteira = await buscarCarteiraPorIdD1(db, id, telefone);
+    if (!carteira) {
+      throw new Error('Carteira não encontrada');
+    }
+    
+    // Não permite remover a carteira padrão se houver transações
+    if (carteira.padrao === 1) {
+      const transacoes = await db
+        .prepare('SELECT COUNT(*) as count FROM transacoes WHERE carteiraId = ?')
+        .bind(id)
+        .first<{ count: number }>();
+      
+      if (transacoes && transacoes.count > 0) {
+        throw new Error('Não é possível remover a carteira padrão que possui transações');
+      }
+    }
+    
+    // Marca como inativa
+    await db
+      .prepare('UPDATE carteiras SET ativo = 0, atualizadoEm = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(id)
+      .run();
+    
+    // Se era a carteira padrão, remove a referência do usuário
+    if (carteira.padrao === 1) {
+      const variacoes = telefoneVariacoes(telefone);
+      await db
+        .prepare(`UPDATE usuarios SET carteiraPadraoId = NULL WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+        .bind(...variacoes)
+        .run();
+    }
+    
+    return true;
+  } catch (error: any) {
+    console.error('❌ Erro ao remover carteira:', error);
+    // Se a tabela não existir, lança erro mais descritivo
+    if (error.message && error.message.includes('no such table')) {
+      throw new Error('Tabela carteiras não existe no banco de dados. Por favor, aguarde alguns minutos para a propagação ou entre em contato com o suporte.');
+    }
+    throw error;
+  }
+}
+
+export async function definirCarteiraPadraoD1(
+  db: D1Database,
+  id: number,
+  telefone: string
+): Promise<boolean> {
+  const carteira = await buscarCarteiraPorIdD1(db, id, telefone);
+  if (!carteira) {
+    throw new Error('Carteira não encontrada');
+  }
+  
+  const variacoes = telefoneVariacoes(telefone);
+  
+  // Remove o padrão das outras
+  await db
+    .prepare(`UPDATE carteiras SET padrao = 0 WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND id != ?`)
+    .bind(...variacoes, id)
+    .run();
+  
+  // Marca esta como padrão
+  await db
+    .prepare('UPDATE carteiras SET padrao = 1, atualizadoEm = CURRENT_TIMESTAMP WHERE id = ?')
+    .bind(id)
+    .run();
+  
+  // Atualiza o usuário
+  await db
+    .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+    .bind(id, ...variacoes)
+    .run();
+  
+  return true;
+}
