@@ -18,13 +18,18 @@ model Transacao {
   dataHora         String
   data             String
   mensagemOriginal String?
+  carteiraId       Int?     // ID da carteira (opcional para compatibilidade)
   criadoEm         DateTime @default(now())
+
+  // Relação com carteira
+  carteira         Carteira? @relation(fields: [carteiraId], references: [id], onDelete: SetNull)
 
   @@index([telefone])
   @@index([data])
   @@index([categoria])
   @@index([tipo])
   @@index([metodo])
+  @@index([carteiraId])
   @@map("transacoes")
 }
 
@@ -49,6 +54,7 @@ model Usuario {
   status          String    @default("trial") // "trial", "ativo", "expirado"
   assinaturaEm    DateTime? // Data da assinatura (quando assinar)
   templateAtivoId Int?      // ID do template ativo
+  carteiraPadraoId Int?     // ID da carteira padrão
   criadoEm        DateTime  @default(now())
   atualizadoEm    DateTime  @updatedAt
 
@@ -109,4 +115,23 @@ model Template {
   @@index([telefone])
   @@index([ativo])
   @@map("templates")
+}
+
+model Carteira {
+  id              Int       @id @default(autoincrement())
+  telefone        String    // Telefone do usuário
+  nome            String    // Nome da carteira (ex: "Carteira Principal", "Poupança")
+  descricao       String?   // Descrição opcional
+  padrao          Int       @default(0) // 0 = false, 1 = true (carteira padrão)
+  ativo           Int       @default(1) // 0 = false, 1 = true (carteira ativa)
+  criadoEm        DateTime  @default(now())
+  atualizadoEm    DateTime  @updatedAt
+
+  // Relação com transações
+  transacoes      Transacao[]
+
+  @@index([telefone])
+  @@index([padrao])
+  @@index([ativo])
+  @@map("carteiras")
 }

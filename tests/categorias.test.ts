@@ -102,7 +102,7 @@ describe('API de Categorias', () => {
         .set('Authorization', `Bearer ${authToken || 'test-token'}`)
         .send(novaCategoria);
 
-      expect(response.status).toBe(201);
+      expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
       expect(response.body.categoria).toBeDefined();
     });

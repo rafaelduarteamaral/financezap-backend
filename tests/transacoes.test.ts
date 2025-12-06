@@ -11,12 +11,25 @@ jest.mock('../src/database', () => ({
       delete: jest.fn(),
       count: jest.fn(),
     },
+    usuario: {
+      findUnique: jest.fn(),
+    },
+    numeroRegistrado: {
+      findMany: jest.fn(),
+    },
   },
   buscarTransacoesComFiltros: jest.fn(),
   buscarTransacaoPorId: jest.fn(),
   removerTransacao: jest.fn(),
   obterEstatisticas: jest.fn(),
   gastosPorDia: jest.fn(),
+  salvarTransacao: jest.fn(),
+}));
+
+// Mock de carteiras
+jest.mock('../src/carteiras', () => ({
+  buscarCarteiraPadrao: jest.fn(),
+  buscarCarteiraPorId: jest.fn(),
 }));
 
 // Mock de autenticação
@@ -38,10 +51,22 @@ describe('API de Transações', () => {
     
     // Mock de login
     const { prisma } = require('../src/database');
-    prisma.usuario.findUnique = jest.fn().mockResolvedValue({
+    if (prisma && prisma.usuario) {
+      prisma.usuario.findUnique = jest.fn().mockResolvedValue({
+        telefone: 'whatsapp:+5511999999999',
+        nome: 'Teste',
+        status: 'ativo',
+      });
+    }
+
+    // Mock de carteiras
+    const { buscarCarteiraPadrao } = require('../src/carteiras');
+    buscarCarteiraPadrao.mockResolvedValue({
+      id: 1,
       telefone: 'whatsapp:+5511999999999',
-      nome: 'Teste',
-      status: 'ativo',
+      nome: 'Carteira Principal',
+      padrao: 1,
+      ativo: 1,
     });
 
     const loginResponse = await request(app)
@@ -55,7 +80,17 @@ describe('API de Transações', () => {
 
   describe('GET /api/transacoes', () => {
     it('deve retornar lista de transações', async () => {
+      const { prisma } = require('../src/database');
       const { buscarTransacoesComFiltros } = require('../src/database');
+      
+      // Mock das consultas diretas ao Prisma que a rota faz
+      prisma.transacao.findMany = jest.fn().mockResolvedValue([
+        { telefone: 'whatsapp:+5511999999999' }
+      ]);
+      prisma.numeroRegistrado.findMany = jest.fn().mockResolvedValue([
+        { telefone: 'whatsapp:+5511999999999' }
+      ]);
+      
       buscarTransacoesComFiltros.mockResolvedValue({
         transacoes: [
           {
@@ -88,7 +123,17 @@ describe('API de Transações', () => {
     });
 
     it('deve aplicar filtros corretamente', async () => {
+      const { prisma } = require('../src/database');
       const { buscarTransacoesComFiltros } = require('../src/database');
+      
+      // Mock das consultas diretas ao Prisma que a rota faz
+      prisma.transacao.findMany = jest.fn().mockResolvedValue([
+        { telefone: 'whatsapp:+5511999999999' }
+      ]);
+      prisma.numeroRegistrado.findMany = jest.fn().mockResolvedValue([
+        { telefone: 'whatsapp:+5511999999999' }
+      ]);
+      
       buscarTransacoesComFiltros.mockResolvedValue({
         transacoes: [],
         total: 0,
@@ -124,11 +169,23 @@ describe('API de Transações', () => {
 
     it('deve criar transação com sucesso', async () => {
       const { prisma } = require('../src/database');
+      const { buscarCarteiraPadrao } = require('../src/carteiras');
+      
+      // Mock de carteira padrão
+      buscarCarteiraPadrao.mockResolvedValue({
+        id: 1,
+        telefone: 'whatsapp:+5511999999999',
+        nome: 'Carteira Principal',
+        padrao: 1,
+        ativo: 1,
+      });
+      
       prisma.transacao.create = jest.fn().mockResolvedValue({
         id: 2,
         telefone: 'whatsapp:+5511999999999',
         ...novaTransacao,
         dataHora: '2024-01-01 10:00:00',
+        carteiraId: 1,
       });
 
       const response = await request(app)
@@ -136,9 +193,48 @@ describe('API de Transações', () => {
         .set('Authorization', `Bearer ${authToken || 'test-token'}`)
         .send(novaTransacao);
 
-      expect(response.status).toBe(201);
+      expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
       expect(response.body.transacao).toBeDefined();
+    });
+
+    it('deve criar transação com carteira específica', async () => {
+      const { prisma } = require('../src/database');
+      const { buscarCarteiraPorId, buscarCarteiraPadrao } = require('../src/carteiras');
+      const { salvarTransacao } = require('../src/database');
+      
+      // Mock de carteira específica
+      buscarCarteiraPorId.mockResolvedValue({
+        id: 2,
+        telefone: 'whatsapp:+5511999999999',
+        nome: 'Poupança',
+        padrao: 0,
+        ativo: 1,
+      });
+      
+      // Não deve chamar buscarCarteiraPadrao se carteiraId for fornecido
+      buscarCarteiraPadrao.mockResolvedValue(null);
+      
+      salvarTransacao.mockResolvedValue(3);
+      prisma.transacao.findUnique = jest.fn().mockResolvedValue({
+        id: 3,
+        telefone: 'whatsapp:+5511999999999',
+        ...novaTransacao,
+        dataHora: '2024-01-01 10:00:00',
+        carteiraId: 2,
+      });
+
+      const response = await request(app)
+        .post('/api/transacoes')
+        .set('Authorization', `Bearer ${authToken || 'test-token'}`)
+        .send({
+          ...novaTransacao,
+          carteiraId: 2,
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.transacao.carteiraId).toBe(2);
     });
 
     it('deve retornar erro se descrição não for fornecida', async () => {

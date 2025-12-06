@@ -47,6 +47,15 @@ import {
   removerCategoria,
 } from './categorias';
 import {
+  buscarCarteirasPorTelefone,
+  buscarCarteiraPorId,
+  buscarCarteiraPadrao,
+  criarCarteira,
+  atualizarCarteira,
+  removerCarteira,
+  definirCarteiraPadrao,
+} from './carteiras';
+import {
   sanitizarEntrada,
   validarPermissaoDados,
   validarTelefone,
@@ -113,7 +122,7 @@ if (!accountSid || !authToken) {
   }
 }
 
-if (zapiConfigurada) {
+if (zapiConfigurada && process.env.NODE_ENV !== 'test') {
   console.log('✅ Z-API configurada e disponível');
   // Verifica status da instância ao iniciar (não bloqueia a inicialização)
   verificarStatusInstancia().then(status => {
@@ -410,6 +419,28 @@ app.post('/webhook/whatsapp', async (req, res) => {
               ? 'entrada' 
               : 'saida';
             
+            // Busca carteira mencionada ou usa a padrão
+            let carteiraId: number | null = null;
+            if (transacaoExtraida.carteiraNome) {
+              // Busca carteira pelo nome (case-insensitive)
+              const carteiras = await buscarCarteirasPorTelefone(cleanFromNumber);
+              const carteiraEncontrada = carteiras.find(
+                c => c.nome.toLowerCase().includes(transacaoExtraida.carteiraNome!.toLowerCase()) ||
+                     transacaoExtraida.carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
+              );
+              if (carteiraEncontrada) {
+                carteiraId = carteiraEncontrada.id;
+              }
+            }
+            
+            // Se não encontrou carteira mencionada, usa a padrão
+            if (!carteiraId) {
+              const carteiraPadrao = await buscarCarteiraPadrao(cleanFromNumber);
+              if (carteiraPadrao) {
+                carteiraId = carteiraPadrao.id;
+              }
+            }
+            
             const transacao: Transacao = {
               telefone: cleanFromNumber,
               descricao: transacaoExtraida.descricao,
@@ -419,7 +450,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
               metodo: transacaoExtraida.metodo || 'debito',
               dataHora: mensagem.dataHora,
               data: dataAtual,
-              mensagemOriginal: textoTranscrito ? `[Áudio transcrito] ${messageBody}` : messageBody
+              mensagemOriginal: textoTranscrito ? `[Áudio transcrito] ${messageBody}` : messageBody,
+              carteiraId: carteiraId,
             };
             
             // Log do tipo antes de salvar
@@ -1494,7 +1526,7 @@ app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (
     console.log('📞 Telefone do token:', telefone);
     console.log('📦 Body recebido:', JSON.stringify(req.body, null, 2));
     
-    const { descricao, valor, categoria, tipo, metodo, dataHora, data } = req.body;
+    const { descricao, valor, categoria, tipo, metodo, dataHora, data, carteiraId } = req.body;
     
     // Validações
     if (!descricao || !descricao.trim()) {
@@ -1532,6 +1564,27 @@ app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (
       ? `whatsapp:${telefone}`
       : `whatsapp:+${telefone}`;
     
+    // Busca carteira padrão se não foi informada
+    let carteiraIdFinal: number | null = null;
+    if (carteiraId) {
+      // Valida se a carteira pertence ao usuário
+      const carteira = await buscarCarteiraPorId(Number(carteiraId), telefoneFormatado);
+      if (!carteira) {
+        return res.status(400).json({
+          success: false,
+          error: 'Carteira não encontrada ou não pertence ao usuário'
+        });
+      }
+      carteiraIdFinal = carteira.id;
+    } else {
+      // Busca carteira padrão
+      const carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
+      if (carteiraPadrao) {
+        carteiraIdFinal = carteiraPadrao.id;
+      }
+      // Se não houver carteira padrão, deixa null (compatibilidade com dados antigos)
+    }
+    
     // Prepara dados da transação
     const agora = new Date();
     const dataHoraFormatada = dataHora || agora.toLocaleString('pt-BR');
@@ -1546,6 +1599,7 @@ app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (
       metodo: metodo,
       dataHora: dataHoraFormatada,
       data: dataFormatada,
+      carteiraId: carteiraIdFinal,
     };
     
     console.log('\n═══════════════════════════════════════════════════════════');
@@ -3859,29 +3913,211 @@ app.delete('/api/categorias/:id', autenticarMiddleware, validarPermissaoDados, a
   }
 });
 
-// Inicia o servidor
-app.listen(PORT, async () => {
-  // Inicializa categorias padrão ao iniciar o servidor
+// ============================================
+// API: CARTEIRAS
+// ============================================
+
+// API: Buscar carteiras - PROTEGIDA
+app.get('/api/carteiras', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
   try {
-    await inicializarCategoriasPadrao();
-  } catch (error) {
-    console.error('⚠️  Erro ao inicializar categorias padrão:', error);
+    const telefone = req.telefone;
+    const carteiras = await buscarCarteirasPorTelefone(telefone);
+    
+    res.json({
+      success: true,
+      carteiras: carteiras.map(c => ({
+        id: c.id,
+        nome: c.nome,
+        descricao: c.descricao,
+        padrao: c.padrao === 1,
+        ativo: c.ativo === 1,
+        criadoEm: c.criadoEm,
+        atualizadoEm: c.atualizadoEm,
+      }))
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  console.log(`📡 API de autenticação: http://localhost:${PORT}/api/auth/login`);
-  console.log('');
-  console.log('📱 Interface Web:');
-  console.log(`   👉 http://localhost:${PORT}/app`);
-  console.log('');
-  console.log('📡 Endpoints:');
-  console.log(`   Webhook: http://localhost:${PORT}/webhook/whatsapp`);
-  console.log(`   Teste: http://localhost:${PORT}/test-webhook`);
-  console.log(`   Health: http://localhost:${PORT}/health`);
-  console.log('');
-  console.log('⚠️  IMPORTANTE: Para receber mensagens, você precisa:');
-  console.log('');
-  console.log('1️⃣  Expor o servidor publicamente usando ngrok:');
-  console.log('   - Instale: brew install ngrok (ou baixe em ngrok.com)');
+});
+
+// API: Buscar carteira padrão - PROTEGIDA
+app.get('/api/carteiras/padrao', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const telefone = req.telefone;
+    const carteira = await buscarCarteiraPadrao(telefone);
+    
+    if (!carteira) {
+      return res.json({
+        success: true,
+        carteira: null
+      });
+    }
+    
+    res.json({
+      success: true,
+      carteira: {
+        id: carteira.id,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1,
+        criadoEm: carteira.criadoEm,
+        atualizadoEm: carteira.atualizadoEm,
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API: Criar carteira - PROTEGIDA
+app.post('/api/carteiras', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const telefone = req.telefone;
+    const { nome, descricao, padrao } = req.body;
+
+    if (!nome || nome.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Nome da carteira é obrigatório'
+      });
+    }
+
+    const carteira = await criarCarteira(telefone, nome.trim(), descricao?.trim(), padrao === true);
+
+    res.json({
+      success: true,
+      carteira: {
+        id: carteira.id,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1,
+        criadoEm: carteira.criadoEm,
+        atualizadoEm: carteira.atualizadoEm,
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API: Atualizar carteira - PROTEGIDA
+app.put('/api/carteiras/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const telefone = req.telefone;
+    const { nome, descricao, padrao, ativo } = req.body;
+
+    const dadosAtualizacao: any = {};
+    if (nome !== undefined) dadosAtualizacao.nome = nome.trim();
+    if (descricao !== undefined) dadosAtualizacao.descricao = descricao?.trim() || null;
+    if (padrao !== undefined) dadosAtualizacao.padrao = padrao;
+    if (ativo !== undefined) dadosAtualizacao.ativo = ativo;
+
+    const carteira = await atualizarCarteira(parseInt(id), telefone, dadosAtualizacao);
+
+    res.json({
+      success: true,
+      carteira: {
+        id: carteira.id,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1,
+        criadoEm: carteira.criadoEm,
+        atualizadoEm: carteira.atualizadoEm,
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API: Definir carteira como padrão - PROTEGIDA
+app.post('/api/carteiras/:id/padrao', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const telefone = req.telefone;
+
+    const carteira = await definirCarteiraPadrao(parseInt(id), telefone);
+
+    res.json({
+      success: true,
+      carteira: {
+        id: carteira.id,
+        nome: carteira.nome,
+        descricao: carteira.descricao,
+        padrao: carteira.padrao === 1,
+        ativo: carteira.ativo === 1,
+        criadoEm: carteira.criadoEm,
+        atualizadoEm: carteira.atualizadoEm,
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API: Remover carteira - PROTEGIDA
+app.delete('/api/carteiras/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const telefone = req.telefone;
+
+    await removerCarteira(parseInt(id), telefone);
+
+    res.json({
+      success: true,
+      message: 'Carteira removida com sucesso'
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Inicia o servidor apenas se não estiver em modo de teste
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, async () => {
+    // Inicializa categorias padrão ao iniciar o servidor
+    try {
+      await inicializarCategoriasPadrao();
+    } catch (error) {
+      console.error('⚠️  Erro ao inicializar categorias padrão:', error);
+    }
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`📡 API de autenticação: http://localhost:${PORT}/api/auth/login`);
+    console.log('');
+    console.log('📱 Interface Web:');
+    console.log(`   👉 http://localhost:${PORT}/app`);
+    console.log('');
+    console.log('📡 Endpoints:');
+    console.log(`   Webhook: http://localhost:${PORT}/webhook/whatsapp`);
+    console.log(`   Teste: http://localhost:${PORT}/test-webhook`);
+    console.log(`   Health: http://localhost:${PORT}/health`);
+    console.log('');
+    console.log('⚠️  IMPORTANTE: Para receber mensagens, você precisa:');
+    console.log('');
+    console.log('1️⃣  Expor o servidor publicamente usando ngrok:');
+    console.log('   - Instale: brew install ngrok (ou baixe em ngrok.com)');
   console.log('   - Execute: ngrok http 3000');
   console.log('   - Copie a URL HTTPS (ex: https://abc123.ngrok.io)');
   console.log('');
@@ -3898,10 +4134,11 @@ app.listen(PORT, async () => {
   console.log('4️⃣  Verifique os logs do servidor quando enviar uma mensagem');
   console.log('   - Você deve ver: "🔔 WEBHOOK RECEBIDO DO TWILIO!"');
   console.log('');
-  console.log('5️⃣  Abra a interface web para ver as mensagens:');
-  console.log(`   👉 http://localhost:${PORT}/app`);
-  console.log('');
-});
+    console.log('5️⃣  Abra a interface web para ver as mensagens:');
+    console.log(`   👉 http://localhost:${PORT}/app`);
+    console.log('');
+  });
+}
 
 // Exporta o app para uso em testes
 export { app };

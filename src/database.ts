@@ -18,6 +18,7 @@ export interface Transacao {
   dataHora: string;
   data: string;
   mensagemOriginal?: string;
+  carteiraId?: number | null;
 }
 
 // Salvar uma transação
@@ -36,6 +37,7 @@ export async function salvarTransacao(transacao: Transacao): Promise<number> {
         dataHora: transacao.dataHora,
         data: dataApenas,
         mensagemOriginal: transacao.mensagemOriginal || null,
+        carteiraId: transacao.carteiraId || null,
       },
     });
     

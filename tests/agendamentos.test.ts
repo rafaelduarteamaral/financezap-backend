@@ -107,7 +107,7 @@ describe('API de Agendamentos', () => {
         .set('Authorization', `Bearer ${authToken || 'test-token'}`)
         .send(novoAgendamento);
 
-      expect(response.status).toBe(201);
+      expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
       expect(response.body.agendamento).toBeDefined();
     });

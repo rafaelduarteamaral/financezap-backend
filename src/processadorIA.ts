@@ -37,6 +37,7 @@ export interface TransacaoExtraida {
   categoria: string;
   tipo: 'entrada' | 'saida'; // entrada ou saída de dinheiro
   metodo?: 'credito' | 'debito'; // método de pagamento (opcional)
+  carteiraNome?: string; // Nome da carteira mencionada (opcional)
   sucesso: boolean;
 }
 
@@ -253,10 +254,20 @@ Retorne APENAS um JSON válido com o seguinte formato:
       "valor": 50.00,
       "categoria": "comida",
       "tipo": "saida",
-      "metodo": "debito"
+      "metodo": "debito",
+      "carteiraNome": "nome da carteira mencionada (opcional, apenas se mencionado na mensagem)"
     }
   ]
 }
+
+IMPORTANTE SOBRE CARTEIRAS:
+- Se a mensagem mencionar uma carteira específica (ex: "na carteira principal", "da poupança", "no cartão"), extraia o nome da carteira no campo "carteiraNome"
+- Se não mencionar carteira, deixe "carteiraNome" como null ou não inclua o campo
+- Exemplos de menções de carteira:
+  - "gastei 50 reais na carteira principal" → carteiraNome: "principal"
+  - "comprei algo por 100 na poupança" → carteiraNome: "poupança"
+  - "paguei 30 do cartão" → carteiraNome: "cartão"
+  - "recebi 500 na conta corrente" → carteiraNome: "conta corrente"
 
 Regras:
 - Extraia TODAS as transações mencionadas, mesmo que estejam em linhas separadas
@@ -501,6 +512,7 @@ Regras:
           categoria: categoriaFinal,
           tipo: tipoFinal as 'entrada' | 'saida',
           metodo: (t.metodo && t.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito' as 'credito' | 'debito',
+          carteiraNome: t.carteiraNome || undefined,
           sucesso: true
         };
       }).filter((t: TransacaoExtraida) => t.valor > 0);
@@ -537,10 +549,20 @@ Retorne APENAS um JSON válido com o seguinte formato:
       "valor": 50.00,
       "categoria": "comida",
       "tipo": "saida",
-      "metodo": "debito"
+      "metodo": "debito",
+      "carteiraNome": "nome da carteira mencionada (opcional, apenas se mencionado na mensagem)"
     }
   ]
 }
+
+IMPORTANTE SOBRE CARTEIRAS:
+- Se a mensagem mencionar uma carteira específica (ex: "na carteira principal", "da poupança", "no cartão"), extraia o nome da carteira no campo "carteiraNome"
+- Se não mencionar carteira, deixe "carteiraNome" como null ou não inclua o campo
+- Exemplos de menções de carteira:
+  - "gastei 50 reais na carteira principal" → carteiraNome: "principal"
+  - "comprei algo por 100 na poupança" → carteiraNome: "poupança"
+  - "paguei 30 do cartão" → carteiraNome: "cartão"
+  - "recebi 500 na conta corrente" → carteiraNome: "conta corrente"
 
 Regras:
 - Extraia TODAS as transações mencionadas
@@ -770,6 +792,7 @@ Regras:
           categoria: categoriaFinal,
           tipo: tipoFinal as 'entrada' | 'saida',
           metodo: (t.metodo && t.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito' as 'credito' | 'debito',
+          carteiraNome: t.carteiraNome || undefined,
           sucesso: true
         };
       }).filter((t: TransacaoExtraida) => t.valor > 0);
