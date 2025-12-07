@@ -1374,14 +1374,77 @@ export async function criarTemplatesPadraoD1(
     const variacoes = telefoneVariacoes(telefone);
     const preferida = variacoes[0];
     
-    // Verifica se já existem templates para este usuário
-    const templatesExistentes = await db
-      .prepare('SELECT id FROM templates WHERE telefone = ?')
-      .bind(preferida)
+    // Verifica se já existem templates padrão (dark e light) para este usuário
+    // Verifica todas as variações do telefone para evitar duplicatas
+    const templatesDark = await db
+      .prepare(`SELECT id FROM templates WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND tipo = 'dark'`)
+      .bind(...variacoes)
       .all<TemplateRecord>();
     
-    if (templatesExistentes.results && templatesExistentes.results.length > 0) {
-      return; // Já existem templates
+    const templatesLight = await db
+      .prepare(`SELECT id FROM templates WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND tipo = 'light'`)
+      .bind(...variacoes)
+      .all<TemplateRecord>();
+    
+    // Se já existem ambos os templates padrão, não cria novamente
+    if (templatesDark.results && templatesDark.results.length > 0 && 
+        templatesLight.results && templatesLight.results.length > 0) {
+      return; // Já existem templates padrão
+    }
+    
+    // Se existe apenas um dos templates, cria o que falta
+    const temDark = templatesDark.results && templatesDark.results.length > 0;
+    const temLight = templatesLight.results && templatesLight.results.length > 0;
+    
+    let templateLightId: number | null = null;
+    
+    // Cria template Dark se não existir
+    if (!temDark) {
+      await db
+        .prepare(`
+          INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
+          VALUES (?, 'Dark', 'dark', '#3B82F6', '#8B5CF6', '#10B981', '#1E293B', '#F1F5F9', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `)
+        .bind(preferida)
+        .run();
+    }
+    
+    // Cria template Light se não existir
+    if (!temLight) {
+      const resultLight = await db
+        .prepare(`
+          INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
+          VALUES (?, 'Light', 'light', '#3B82F6', '#8B5CF6', '#10B981', '#F9FAFB', '#111827', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `)
+        .bind(preferida)
+        .run();
+      
+      templateLightId = Number(resultLight.meta.last_row_id);
+    } else {
+      // Se já existe Light, busca o ID para atualizar o usuário
+      const lightExistente = templatesLight.results[0];
+      if (lightExistente && lightExistente.id) {
+        templateLightId = lightExistente.id;
+      }
+    }
+    
+    // Atualiza o usuário com o template ativo (Light) se não tiver um template ativo definido
+    if (templateLightId) {
+      const usuario = await db
+        .prepare('SELECT templateAtivoId FROM usuarios WHERE telefone = ?')
+        .bind(preferida)
+        .first<{ templateAtivoId: number | null }>();
+      
+      if (!usuario || !usuario.templateAtivoId) {
+        await db
+          .prepare('UPDATE usuarios SET templateAtivoId = ? WHERE telefone = ?')
+          .bind(templateLightId, preferida)
+          .run();
+      }
+    }
+    
+    if (!temDark || !temLight) {
+      console.log(`✅ Templates padrão criados/verificados para: ${preferida}`);
     }
   } catch (error: any) {
     // Se a tabela não existir, ignora o erro (será criada depois)
@@ -1391,43 +1454,55 @@ export async function criarTemplatesPadraoD1(
     }
     throw error;
   }
-  
-  const variacoes = telefoneVariacoes(telefone);
-  const preferida = variacoes[0];
-  
-  // Template Dark
-  await db
-    .prepare(`
-      INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
-      VALUES (?, 'Dark', 'dark', '#3B82F6', '#8B5CF6', '#10B981', '#1E293B', '#F1F5F9', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `)
-    .bind(preferida)
-    .run();
-  
-  // Template Light
-  const resultLight = await db
-    .prepare(`
-      INSERT INTO templates (telefone, nome, tipo, corPrimaria, corSecundaria, corDestaque, corFundo, corTexto, ativo, criadoEm, atualizadoEm)
-      VALUES (?, 'Light', 'light', '#3B82F6', '#8B5CF6', '#10B981', '#F9FAFB', '#111827', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `)
-    .bind(preferida)
-    .run();
-  
-  const templateLightId = Number(resultLight.meta.last_row_id);
-  
-  // Atualiza o usuário com o template ativo
-  await db
-    .prepare('UPDATE usuarios SET templateAtivoId = ? WHERE telefone = ?')
-    .bind(templateLightId, preferida)
-    .run();
-  
-  console.log(`✅ Templates padrão criados para: ${preferida}`);
+}
+
+// Remove templates duplicados (mantém apenas o mais antigo de cada tipo padrão)
+export async function limparTemplatesDuplicadosD1(
+  db: D1Database,
+  telefone: string
+): Promise<number> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    let removidos = 0;
+    
+    // Para cada tipo padrão (dark e light), mantém apenas o mais antigo
+    for (const tipo of ['dark', 'light']) {
+      const templates = await db
+        .prepare(`SELECT id, criadoEm FROM templates WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND tipo = ? ORDER BY criadoEm ASC`)
+        .bind(...variacoes, tipo)
+        .all<{ id: number; criadoEm: string }>();
+      
+      if (templates.results && templates.results.length > 1) {
+        // Mantém o primeiro (mais antigo) e remove os demais
+        const manterId = templates.results[0].id;
+        const idsParaRemover = templates.results.slice(1).map(t => t.id);
+        
+        for (const id of idsParaRemover) {
+          await db
+            .prepare('DELETE FROM templates WHERE id = ?')
+            .bind(id)
+            .run();
+          removidos++;
+        }
+        
+        console.log(`🧹 Removidos ${idsParaRemover.length} templates duplicados do tipo '${tipo}' para ${telefone}`);
+      }
+    }
+    
+    return removidos;
+  } catch (error: any) {
+    console.error('❌ Erro ao limpar templates duplicados:', error);
+    return 0;
+  }
 }
 
 export async function buscarTemplatesD1(
   db: D1Database,
   telefone: string
 ): Promise<TemplateRecord[]> {
+  // Limpa templates duplicados antes de garantir que os padrão existem
+  await limparTemplatesDuplicadosD1(db, telefone);
+  
   // Garante que os templates padrão existem
   await criarTemplatesPadraoD1(db, telefone);
   
@@ -1680,12 +1755,56 @@ export interface CarteiraRecord {
   atualizadoEm: string;
 }
 
+// Garante que apenas uma carteira seja padrão por vez
+async function garantirApenasUmaCarteiraPadraoD1(
+  db: D1Database,
+  telefone: string,
+  carteiraIdExcluir?: number
+): Promise<void> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    
+    // Busca todas as carteiras padrão do usuário
+    const carteirasPadrao = await db
+      .prepare(`SELECT id FROM carteiras WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND padrao = 1 AND ativo = 1${carteiraIdExcluir ? ' AND id != ?' : ''}`)
+      .bind(...variacoes, ...(carteiraIdExcluir ? [carteiraIdExcluir] : []))
+      .all<{ id: number }>();
+    
+    // Se há mais de uma carteira padrão, mantém apenas a primeira (mais antiga)
+    if (carteirasPadrao.results && carteirasPadrao.results.length > 1) {
+      const manterId = carteirasPadrao.results[0].id;
+      const idsParaRemover = carteirasPadrao.results.slice(1).map(c => c.id);
+      
+      for (const id of idsParaRemover) {
+        await db
+          .prepare('UPDATE carteiras SET padrao = 0, atualizadoEm = CURRENT_TIMESTAMP WHERE id = ?')
+          .bind(id)
+          .run();
+      }
+      
+      // Atualiza o usuário para apontar para a carteira mantida
+      await db
+        .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+        .bind(manterId, ...variacoes)
+        .run();
+      
+      console.log(`🔧 Corrigido: ${idsParaRemover.length} carteira(s) duplicada(s) removida(s) do padrão`);
+    }
+  } catch (error: any) {
+    console.error('❌ Erro ao garantir apenas uma carteira padrão:', error);
+    // Não lança erro, apenas loga
+  }
+}
+
 export async function buscarCarteirasD1(
   db: D1Database,
   telefone: string
 ): Promise<CarteiraRecord[]> {
   try {
     const variacoes = telefoneVariacoes(telefone);
+    
+    // Garante que apenas uma carteira seja padrão antes de buscar
+    await garantirApenasUmaCarteiraPadraoD1(db, telefone);
     
     const carteiras = await db
       .prepare(`
@@ -1788,13 +1907,15 @@ export async function criarCarteiraD1(
   const variacoes = telefoneVariacoes(telefone);
   const preferida = variacoes[0];
   
-  // Se está marcando como padrão, remove o padrão das outras
+  // Se está marcando como padrão, remove o padrão de TODAS as outras (garante apenas uma padrão)
   if (dados.padrao === true) {
+    // Remove padrão de todas as carteiras do usuário
     await db
       .prepare(`UPDATE carteiras SET padrao = 0 WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
       .bind(...variacoes)
       .run();
     
+    // Limpa a referência do usuário temporariamente (será atualizada após criar a carteira)
     await db
       .prepare(`UPDATE usuarios SET carteiraPadraoId = NULL WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
       .bind(...variacoes)
@@ -1822,6 +1943,9 @@ export async function criarCarteiraD1(
       .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
       .bind(carteiraId, ...variacoes)
       .run();
+    
+    // Garante que apenas esta carteira seja padrão (limpeza final)
+    await garantirApenasUmaCarteiraPadraoD1(db, telefone, carteiraId);
   }
   
   return carteiraId;
@@ -1843,18 +1967,50 @@ export async function atualizarCarteiraD1(
     throw new Error('Carteira não encontrada');
   }
   
-  // Se está marcando como padrão, remove o padrão das outras
+  const variacoes = telefoneVariacoes(telefone);
+  
+  // Se está marcando como padrão, remove o padrão de TODAS as outras (garante apenas uma padrão)
   if (dados.padrao === true) {
-    const variacoes = telefoneVariacoes(telefone);
+    // Remove padrão de todas as carteiras do usuário (exceto a atual)
     await db
       .prepare(`UPDATE carteiras SET padrao = 0 WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND id != ?`)
       .bind(...variacoes, id)
       .run();
     
+    // Atualiza o usuário para apontar para esta carteira
     await db
       .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
       .bind(id, ...variacoes)
       .run();
+    
+    // Garante que apenas esta carteira seja padrão (limpeza final)
+    await garantirApenasUmaCarteiraPadraoD1(db, telefone, id);
+  }
+  
+  // Se está desmarcando como padrão (padrao === false) e esta é a única padrão,
+  // marca a primeira outra carteira ativa como padrão
+  if (dados.padrao === false && carteira.padrao === 1) {
+    // Busca outra carteira ativa para ser a nova padrão
+    const outraCarteira = await db
+      .prepare(`SELECT id FROM carteiras WHERE telefone IN (${variacoes.map(() => '?').join(',')}) AND id != ? AND ativo = 1 LIMIT 1`)
+      .bind(...variacoes, id)
+      .first<{ id: number }>();
+    
+    if (outraCarteira) {
+      // Marca a outra carteira como padrão
+      await db
+        .prepare('UPDATE carteiras SET padrao = 1, atualizadoEm = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(outraCarteira.id)
+        .run();
+      
+      await db
+        .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+        .bind(outraCarteira.id, ...variacoes)
+        .run();
+    } else {
+      // Se não há outra carteira, não permite desmarcar esta como padrão
+      throw new Error('Não é possível remover a carteira padrão. É necessário ter pelo menos uma carteira padrão.');
+    }
   }
   
   const updates: string[] = [];
@@ -1885,6 +2041,11 @@ export async function atualizarCarteiraD1(
     .prepare(`UPDATE carteiras SET ${updates.join(', ')} WHERE id = ?`)
     .bind(...params, id)
     .run();
+  
+  // Se marcou como padrão, garante que apenas esta seja padrão
+  if (dados.padrao === true) {
+    await garantirApenasUmaCarteiraPadraoD1(db, telefone, id);
+  }
   
   return true;
 }
@@ -1967,6 +2128,9 @@ export async function definirCarteiraPadraoD1(
     .prepare(`UPDATE usuarios SET carteiraPadraoId = ? WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
     .bind(id, ...variacoes)
     .run();
+  
+  // Garante que apenas esta carteira seja padrão (limpeza final)
+  await garantirApenasUmaCarteiraPadraoD1(db, telefone, id);
   
   return true;
 }
