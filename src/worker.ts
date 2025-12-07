@@ -39,6 +39,7 @@ import {
   definirCarteiraPadraoD1,
 } from './d1';
 import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from './codigoVerificacao';
+import { gerarDadosRelatorio, calcularPeriodo, formatarRelatorioWhatsApp, formatarRelatorioMensalCompleto } from './relatorios';
 import jwt from '@tsndr/cloudflare-worker-jwt';
 
 // Tipos para Cloudflare Workers
@@ -3249,7 +3250,87 @@ app.post('/webhook/zapi', async (c) => {
     const cleanFromNumber = telefoneFormatado.replace('whatsapp:', '');
     await registrarNumero(c.env.financezap_db, cleanFromNumber);
     
-    // PRIMEIRO: Verifica se é um agendamento antes de processar como transação
+    // PRIMEIRO: Verifica se é solicitação de relatório
+    console.log('🔍 Verificando se é solicitação de relatório...');
+    const mensagemLowerRelatorio = messageText.toLowerCase();
+    const palavrasRelatorio = [
+      'relatório', 'relatorio', 'relatório semanal', 'relatorio semanal',
+      'relatório diário', 'relatorio diario', 'relatório diario',
+      'relatório mensal', 'relatorio mensal',
+      'resumo semanal', 'resumo diário', 'resumo diario', 'resumo mensal',
+      'resumo financeiro', 'resumo do dia', 'resumo da semana', 'resumo do mês', 'resumo do mes',
+      'gastos da semana', 'gastos do dia', 'gastos do mês', 'gastos do mes',
+      'despesas da semana', 'despesas do dia', 'despesas do mês', 'despesas do mes',
+      'ver relatório', 'ver relatorio', 'mostrar relatório', 'mostrar relatorio'
+    ];
+    
+    const temPalavraRelatorio = palavrasRelatorio.some(palavra => 
+      mensagemLowerRelatorio.includes(palavra)
+    );
+    
+    if (temPalavraRelatorio) {
+      console.log('📊 Solicitação de relatório detectada, processando...');
+      
+      try {
+        // Detecta o tipo de relatório
+        let tipoRelatorio: 'diario' | 'semanal' | 'mensal' = 'semanal'; // padrão
+        
+        if (mensagemLowerRelatorio.includes('diário') || mensagemLowerRelatorio.includes('diario') || mensagemLowerRelatorio.includes('do dia') || mensagemLowerRelatorio.includes('hoje')) {
+          tipoRelatorio = 'diario';
+        } else if (mensagemLowerRelatorio.includes('semanal') || mensagemLowerRelatorio.includes('da semana')) {
+          tipoRelatorio = 'semanal';
+        } else if (mensagemLowerRelatorio.includes('mensal') || mensagemLowerRelatorio.includes('do mês') || mensagemLowerRelatorio.includes('do mes')) {
+          tipoRelatorio = 'mensal';
+        }
+        
+        console.log(`📊 Gerando relatório ${tipoRelatorio}...`);
+        
+        // Calcula o período
+        const periodo = calcularPeriodo(tipoRelatorio);
+        
+        // Busca carteira padrão do usuário
+        let carteiraNome: string | undefined;
+        try {
+          const carteiraPadrao = await buscarCarteiraPadraoD1(c.env.financezap_db, cleanFromNumber);
+          if (carteiraPadrao) {
+            carteiraNome = carteiraPadrao.nome;
+          }
+        } catch (error) {
+          console.warn('⚠️ Erro ao buscar carteira padrão:', error);
+        }
+        
+        // Gera os dados do relatório
+        const dadosRelatorio = await gerarDadosRelatorio(
+          c.env.financezap_db,
+          cleanFromNumber,
+          periodo
+        );
+        
+        // Formata o relatório
+        let relatorioFormatado: string;
+        if (tipoRelatorio === 'mensal' && mensagemLowerRelatorio.includes('resumo financeiro')) {
+          relatorioFormatado = formatarRelatorioMensalCompleto(dadosRelatorio, carteiraNome);
+        } else {
+          relatorioFormatado = formatarRelatorioWhatsApp(dadosRelatorio, carteiraNome);
+        }
+        
+        // Envia o relatório
+        await enviarMensagemZApi(telefoneFormatado, relatorioFormatado, c.env);
+        console.log(`✅ Relatório ${tipoRelatorio} enviado para:`, telefoneFormatado);
+        
+        return c.json({ success: true, message: `Relatório ${tipoRelatorio} enviado com sucesso` });
+      } catch (error: any) {
+        console.error('❌ Erro ao gerar relatório:', error);
+        await enviarMensagemZApi(
+          telefoneFormatado,
+          '❌ Erro ao gerar relatório. Por favor, tente novamente.',
+          c.env
+        );
+        // Continua o processamento se houver erro
+      }
+    }
+    
+    // SEGUNDO: Verifica se é um agendamento antes de processar como transação
     console.log('🔍 Verificando se é agendamento...');
     const palavrasAgendamento = [
       'agendar', 'agende', 'agendamento', 'agendado', 'agenda',
