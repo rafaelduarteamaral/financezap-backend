@@ -17,7 +17,9 @@ import {
   calcularTotalPorTelefone, 
   buscarTransacoesComFiltros,
   obterEstatisticas,
+  obterEstatisticasCredito,
   gastosPorDia,
+  gastosPorDiaCredito,
   listarTelefones,
   registrarNumero,
   numeroEstaRegistrado,
@@ -51,6 +53,7 @@ import {
   buscarCarteiraPorId,
   buscarCarteiraPadrao,
   criarCarteira,
+  buscarOuCriarCarteiraPorTipo,
   atualizarCarteira,
   removerCarteira,
   definirCarteiraPadrao,
@@ -342,7 +345,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
             break; // Para após processar o primeiro áudio
           } else {
             console.log('⚠️  Transcrição vazia ou não encontrada');
-            twiml.message('Não consegui entender o áudio. Por favor, envie uma mensagem de texto ou tente novamente.');
+            twiml.message('Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!');
             res.type('text/xml');
             return res.send(twiml.toString());
           }
@@ -350,15 +353,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
           console.error('❌ Erro ao processar áudio:', error.message);
           console.error('   Stack:', error.stack);
           
-          // Mensagem mais específica se a API não estiver habilitada
-          let mensagemErro = 'Desculpe, ocorreu um erro ao processar o áudio. Por favor, envie uma mensagem de texto.';
-          if (error.message?.includes('não está habilitada') || error.message?.includes('Gemini não configurado')) {
-            mensagemErro = 'A transcrição de áudio não está configurada. Por favor, envie uma mensagem de texto.';
-          } else if (error.message?.includes('timeout')) {
-            mensagemErro = 'O áudio demorou muito para processar. Por favor, envie uma mensagem de texto ou tente novamente.';
-          }
-          
-          twiml.message(mensagemErro);
+          // Mensagem amigável em caso de erro
+          twiml.message('Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!');
           res.type('text/xml');
           return res.send(twiml.toString());
         }
@@ -497,11 +493,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
       twiml.message(resposta);
       } else {
         console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
-        twiml.message('Não entendi nenhuma transação financeira na sua mensagem. Por favor, tente novamente informando o que você comprou e o valor. Exemplo: "comprei um sanduíche por 20 reais"');
+        twiml.message('Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!');
       }
     } catch (error: any) {
       console.error('❌ Erro ao processar mensagem com IA:', error.message);
-      twiml.message('Desculpe, ocorreu um erro ao processar sua mensagem. Verifique se a IA está configurada corretamente.');
+      twiml.message('Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!');
     }
   }
   
@@ -703,16 +699,50 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
           messageText = textoTranscrito; // Usa o texto transcrito como mensagem
         } else {
           console.log('⚠️  Transcrição vazia ou não encontrada');
+          const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+          
+          // Envia mensagem amigável via WhatsApp
+          try {
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: mensagemAmigavel
+              });
+            }
+          } catch (envioError: any) {
+            console.error('❌ Erro ao enviar mensagem amigável:', envioError.message);
+          }
+          
           return res.json({ 
             success: false, 
-            error: 'Não consegui entender o áudio. Por favor, envie uma mensagem de texto ou tente novamente.' 
+            error: 'Transcrição vazia' 
           });
         }
       } catch (error: any) {
         console.error('❌ Erro ao processar áudio da Z-API:', error.message);
+        const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+        
+        // Envia mensagem amigável via WhatsApp
+        try {
+          if (zapiEstaConfigurada()) {
+            await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+          } else if (twilioWhatsAppNumber) {
+            await client.messages.create({
+              from: twilioWhatsAppNumber,
+              to: fromNumber,
+              body: mensagemAmigavel
+            });
+          }
+        } catch (envioError: any) {
+          console.error('❌ Erro ao enviar mensagem amigável:', envioError.message);
+        }
+        
         return res.json({ 
           success: false, 
-          error: 'Desculpe, ocorreu um erro ao processar o áudio. Por favor, envie uma mensagem de texto.' 
+          error: 'Erro ao processar áudio' 
         });
       }
     }
@@ -1106,19 +1136,8 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               ? `whatsapp:${cleanFromNumber}`
               : `whatsapp:+${cleanFromNumber}`;
             
-            let carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
-            
-            // Se não houver carteira padrão, cria uma automaticamente
-            if (!carteiraPadrao) {
-              console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
-              carteiraPadrao = await criarCarteira(
-                telefoneFormatado,
-                'Carteira Principal',
-                'Carteira padrão criada automaticamente',
-                true // Define como padrão
-              );
-              console.log(`✅ Carteira padrão criada automaticamente: ID ${carteiraPadrao.id}`);
-            }
+            // Para agendamentos, sempre usa débito (pagamento/recebimento)
+            const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, 'debito');
             
             // Cria transação automaticamente
             const dataAtual = new Date().toISOString().split('T')[0];
@@ -1132,7 +1151,7 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               dataHora: new Date().toLocaleString('pt-BR'),
               data: dataAtual,
               mensagemOriginal: messageText,
-              carteiraId: carteiraPadrao.id
+              carteiraId: carteiraApropriada.id
             };
             
             await salvarTransacao(transacao);
@@ -1184,34 +1203,6 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
             ? `whatsapp:${cleanFromNumber}`
             : `whatsapp:+${cleanFromNumber}`;
           
-          let carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
-          
-          // Se não houver carteira padrão, cria uma automaticamente
-          if (!carteiraPadrao) {
-            console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
-            carteiraPadrao = await criarCarteira(
-              telefoneFormatado,
-              'Carteira Principal',
-              'Carteira padrão criada automaticamente',
-              true // Define como padrão
-            );
-            console.log(`✅ Carteira padrão criada automaticamente: ID ${carteiraPadrao.id}`);
-          }
-          
-          // Se a IA extraiu um nome de carteira, tenta encontrar a carteira correspondente
-          let carteiraIdParaTransacao = carteiraPadrao.id;
-          if (transacoesExtraidas[0]?.carteiraNome) {
-            const carteirasUsuario = await buscarCarteirasPorTelefone(telefoneFormatado);
-            const carteiraEncontrada = carteirasUsuario.find(c => 
-              c.nome.toLowerCase().includes(transacoesExtraidas[0].carteiraNome!.toLowerCase()) ||
-              transacoesExtraidas[0].carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
-            );
-            if (carteiraEncontrada) {
-              carteiraIdParaTransacao = carteiraEncontrada.id;
-              console.log(`   📦 Carteira específica encontrada: "${carteiraEncontrada.nome}" (ID: ${carteiraEncontrada.id})`);
-            }
-          }
-          
           // Salva cada transação no banco de dados
           for (const transacaoExtraida of transacoesExtraidas) {
             if (transacaoExtraida.sucesso) {
@@ -1222,6 +1213,30 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                 const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
                   ? 'entrada' 
                   : 'saida';
+                
+                // Determina o tipo de carteira baseado no método da transação
+                const tipoCarteiraNecessario = (transacaoExtraida.metodo || 'debito') as 'debito' | 'credito';
+                
+                // Se a IA extraiu um nome de carteira, tenta encontrar a carteira correspondente
+                let carteiraIdParaTransacao: number | null = null;
+                if (transacoesExtraidas[0]?.carteiraNome) {
+                  const carteirasUsuario = await buscarCarteirasPorTelefone(telefoneFormatado);
+                  const carteiraEncontrada = carteirasUsuario.find(c => 
+                    c.nome.toLowerCase().includes(transacoesExtraidas[0].carteiraNome!.toLowerCase()) ||
+                    transacoesExtraidas[0].carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
+                  );
+                  if (carteiraEncontrada && carteiraEncontrada.tipo === tipoCarteiraNecessario) {
+                    carteiraIdParaTransacao = carteiraEncontrada.id;
+                    console.log(`   📦 Carteira específica encontrada: "${carteiraEncontrada.nome}" (ID: ${carteiraEncontrada.id}, tipo: ${carteiraEncontrada.tipo})`);
+                  }
+                }
+                
+                // Se não encontrou carteira específica, busca ou cria uma apropriada para o tipo
+                if (!carteiraIdParaTransacao) {
+                  const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
+                  carteiraIdParaTransacao = carteiraApropriada.id;
+                  console.log(`   📦 Carteira utilizada: "${carteiraApropriada.nome}" (ID: ${carteiraApropriada.id}, tipo: ${carteiraApropriada.tipo})`);
+                }
                 
                 const transacao: Transacao = {
                   telefone: cleanFromNumber,
@@ -1295,10 +1310,41 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
           }
         } else {
           console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
-          // Não envia resposta se não encontrar transação (evita spam)
+          // Envia mensagem amigável quando não entende
+          const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+          
+          if (zapiEstaConfigurada()) {
+            await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+          } else if (twilioWhatsAppNumber) {
+            try {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: mensagemAmigavel
+              });
+            } catch (error: any) {
+              console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
+            }
+          }
         }
       } catch (error: any) {
         console.error('❌ Erro ao processar mensagem com IA:', error.message);
+        // Envia mensagem amigável em caso de erro
+        const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+        
+        try {
+          if (zapiEstaConfigurada()) {
+            await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+          } else if (twilioWhatsAppNumber) {
+            await client.messages.create({
+              from: twilioWhatsAppNumber,
+              to: fromNumber,
+              body: mensagemAmigavel
+            });
+          }
+        } catch (envioError: any) {
+          console.error('❌ Erro ao enviar mensagem amigável:', envioError.message);
+        }
       }
     }
     
@@ -1489,6 +1535,16 @@ app.get('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (r
     if (valorMax) filtros.valorMax = parseFloat(valorMax as string);
     if (descricao) filtros.descricao = descricao as string;
     if (categoria) filtros.categoria = categoria as string;
+    
+    // Filtro de múltiplas carteiras
+    const carteirasIds = req.query.carteirasIds;
+    if (carteirasIds) {
+      if (Array.isArray(carteirasIds)) {
+        filtros.carteirasIds = carteirasIds.map(id => parseInt(id as string)).filter(id => !isNaN(id));
+      } else {
+        filtros.carteirasIds = [parseInt(carteirasIds as string)].filter(id => !isNaN(id));
+      }
+    }
 
     console.log('\n🔍 Filtros que serão usados na busca:');
     console.log(JSON.stringify(filtros, null, 2));
@@ -1636,22 +1692,13 @@ app.post('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (
       }
       carteiraIdFinal = carteira.id;
     } else {
-      // Busca carteira padrão
-      let carteiraPadrao = await buscarCarteiraPadrao(telefoneFormatado);
+      // Determina o tipo de carteira baseado no método da transação
+      const tipoCarteiraNecessario = (metodo || 'debito') as 'debito' | 'credito';
       
-      // Se não houver carteira padrão, cria uma automaticamente
-      if (!carteiraPadrao) {
-        console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
-        carteiraPadrao = await criarCarteira(
-          telefoneFormatado,
-          'Carteira Principal',
-          'Carteira padrão criada automaticamente',
-          true // Define como padrão
-        );
-        console.log(`✅ Carteira padrão criada: ID ${carteiraPadrao.id}`);
-      }
-      
-      carteiraIdFinal = carteiraPadrao.id;
+      // Busca ou cria carteira apropriada para o tipo
+      const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
+      carteiraIdFinal = carteiraApropriada.id;
+      console.log(`📦 Carteira utilizada: "${carteiraApropriada.nome}" (ID: ${carteiraApropriada.id}, tipo: ${carteiraApropriada.tipo})`);
     }
     
     // Prepara dados da transação
@@ -1824,6 +1871,16 @@ app.get('/api/estatisticas', autenticarMiddleware, validarPermissaoDados, async 
     if (valorMax) filtros.valorMax = parseFloat(valorMax as string);
     if (descricao) filtros.descricao = descricao as string;
     if (categoria) filtros.categoria = categoria as string;
+    
+    // Filtro de múltiplas carteiras
+    const carteirasIds = req.query.carteirasIds;
+    if (carteirasIds) {
+      if (Array.isArray(carteirasIds)) {
+        filtros.carteirasIds = carteirasIds.map(id => parseInt(id as string)).filter(id => !isNaN(id));
+      } else {
+        filtros.carteirasIds = [parseInt(carteirasIds as string)].filter(id => !isNaN(id));
+      }
+    }
 
     console.log('📊 Filtros para estatísticas:', JSON.stringify(filtros, null, 2));
 
@@ -1837,6 +1894,59 @@ app.get('/api/estatisticas', autenticarMiddleware, validarPermissaoDados, async 
     });
   } catch (error: any) {
     console.error('❌ Erro em /api/estatisticas:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API: Estatísticas de CRÉDITO - PROTEGIDA
+app.get('/api/estatisticas-credito', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { dataInicio, dataFim, valorMin, valorMax, descricao, categoria } = req.query;
+    const telefone = req.telefone;
+    
+    if (!telefone) {
+      console.error('❌ Erro: telefone não encontrado no token JWT');
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+    
+    const filtros: any = {
+      telefone
+    };
+    if (dataInicio) filtros.dataInicio = dataInicio as string;
+    if (dataFim) filtros.dataFim = dataFim as string;
+    if (valorMin) filtros.valorMin = parseFloat(valorMin as string);
+    if (valorMax) filtros.valorMax = parseFloat(valorMax as string);
+    if (descricao) filtros.descricao = descricao as string;
+    if (categoria) filtros.categoria = categoria as string;
+    
+    // Filtro de múltiplas carteiras
+    const carteirasIds = req.query.carteirasIds;
+    if (carteirasIds) {
+      if (Array.isArray(carteirasIds)) {
+        filtros.carteirasIds = carteirasIds.map(id => parseInt(id as string)).filter(id => !isNaN(id));
+      } else {
+        filtros.carteirasIds = [parseInt(carteirasIds as string)].filter(id => !isNaN(id));
+      }
+    }
+
+    console.log('📊 Filtros para estatísticas de crédito:', JSON.stringify(filtros, null, 2));
+
+    const stats = await obterEstatisticasCredito(filtros);
+    
+    console.log('📊 Estatísticas de crédito retornadas:', JSON.stringify(stats, null, 2));
+    
+    res.json({
+      success: true,
+      estatisticas: stats
+    });
+  } catch (error: any) {
+    console.error('❌ Erro em /api/estatisticas-credito:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -1865,6 +1975,41 @@ app.get('/api/gastos-por-dia', autenticarMiddleware, validarPermissaoDados, asyn
     }
     
     const dados = await gastosPorDia(telefone, diasNum);
+    
+    res.json({
+      success: true,
+      dias: diasNum,
+      dados: dados
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API: Gastos por dia de CRÉDITO (gráfico) - PROTEGIDA
+app.get('/api/gastos-por-dia-credito', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
+  try {
+    const { dias } = req.query;
+    const diasNum = parseInt(dias as string) || 30;
+    
+    console.log('📊 GET /api/gastos-por-dia-credito - Query params:', req.query);
+    console.log('🔐 Telefone do token JWT:', req.telefone);
+    
+    // Usa o telefone do token JWT (usuário autenticado)
+    const telefone = req.telefone;
+    
+    if (!telefone) {
+      console.error('❌ Erro: telefone não encontrado no token JWT');
+      return res.status(401).json({
+        success: false,
+        error: 'Telefone não encontrado no token'
+      });
+    }
+    
+    const dados = await gastosPorDiaCredito(telefone, diasNum);
     
     res.json({
       success: true,
@@ -3998,6 +4143,9 @@ app.get('/api/carteiras', autenticarMiddleware, validarPermissaoDados, async (re
         id: c.id,
         nome: c.nome,
         descricao: c.descricao,
+        tipo: c.tipo,
+        limiteCredito: c.limiteCredito,
+        diaPagamento: c.diaPagamento,
         padrao: c.padrao === 1,
         ativo: c.ativo === 1,
         criadoEm: c.criadoEm,
@@ -4049,7 +4197,7 @@ app.get('/api/carteiras/padrao', autenticarMiddleware, validarPermissaoDados, as
 app.post('/api/carteiras', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
   try {
     const telefone = req.telefone;
-    const { nome, descricao, padrao } = req.body;
+    const { nome, descricao, padrao, tipo, limiteCredito, diaPagamento } = req.body;
 
     if (!nome || nome.trim() === '') {
       return res.status(400).json({
@@ -4058,7 +4206,15 @@ app.post('/api/carteiras', autenticarMiddleware, validarPermissaoDados, async (r
       });
     }
 
-    const carteira = await criarCarteira(telefone, nome.trim(), descricao?.trim(), padrao === true);
+    const carteira = await criarCarteira(
+      telefone, 
+      nome.trim(), 
+      descricao?.trim(), 
+      padrao === true,
+      tipo || 'debito',
+      tipo === 'credito' ? limiteCredito : null,
+      tipo === 'credito' ? diaPagamento : null
+    );
 
     res.json({
       success: true,
@@ -4066,6 +4222,9 @@ app.post('/api/carteiras', autenticarMiddleware, validarPermissaoDados, async (r
         id: carteira.id,
         nome: carteira.nome,
         descricao: carteira.descricao,
+        tipo: carteira.tipo,
+        limiteCredito: carteira.limiteCredito,
+        diaPagamento: carteira.diaPagamento,
         padrao: carteira.padrao === 1,
         ativo: carteira.ativo === 1,
         criadoEm: carteira.criadoEm,
@@ -4085,13 +4244,21 @@ app.put('/api/carteiras/:id', autenticarMiddleware, validarPermissaoDados, async
   try {
     const { id } = req.params;
     const telefone = req.telefone;
-    const { nome, descricao, padrao, ativo } = req.body;
+    const { nome, descricao, padrao, ativo, tipo, limiteCredito, diaPagamento } = req.body;
 
     const dadosAtualizacao: any = {};
     if (nome !== undefined) dadosAtualizacao.nome = nome.trim();
     if (descricao !== undefined) dadosAtualizacao.descricao = descricao?.trim() || null;
     if (padrao !== undefined) dadosAtualizacao.padrao = padrao;
     if (ativo !== undefined) dadosAtualizacao.ativo = ativo;
+    if (tipo !== undefined) dadosAtualizacao.tipo = tipo;
+    if (tipo === 'credito') {
+      if (limiteCredito !== undefined) dadosAtualizacao.limiteCredito = limiteCredito;
+      if (diaPagamento !== undefined) dadosAtualizacao.diaPagamento = diaPagamento;
+    } else if (tipo === 'debito') {
+      dadosAtualizacao.limiteCredito = null;
+      dadosAtualizacao.diaPagamento = null;
+    }
 
     const carteira = await atualizarCarteira(parseInt(id), telefone, dadosAtualizacao);
 
@@ -4101,6 +4268,9 @@ app.put('/api/carteiras/:id', autenticarMiddleware, validarPermissaoDados, async
         id: carteira.id,
         nome: carteira.nome,
         descricao: carteira.descricao,
+        tipo: carteira.tipo,
+        limiteCredito: carteira.limiteCredito,
+        diaPagamento: carteira.diaPagamento,
         padrao: carteira.padrao === 1,
         ativo: carteira.ativo === 1,
         criadoEm: carteira.criadoEm,
@@ -4165,28 +4335,28 @@ app.delete('/api/carteiras/:id', autenticarMiddleware, validarPermissaoDados, as
 
 // Inicia o servidor apenas se não estiver em modo de teste
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, async () => {
-    // Inicializa categorias padrão ao iniciar o servidor
-    try {
-      await inicializarCategoriasPadrao();
-    } catch (error) {
-      console.error('⚠️  Erro ao inicializar categorias padrão:', error);
-    }
-    console.log(`🚀 Servidor rodando na porta ${PORT}`);
-    console.log(`📡 API de autenticação: http://localhost:${PORT}/api/auth/login`);
-    console.log('');
-    console.log('📱 Interface Web:');
-    console.log(`   👉 http://localhost:${PORT}/app`);
-    console.log('');
-    console.log('📡 Endpoints:');
-    console.log(`   Webhook: http://localhost:${PORT}/webhook/whatsapp`);
-    console.log(`   Teste: http://localhost:${PORT}/test-webhook`);
-    console.log(`   Health: http://localhost:${PORT}/health`);
-    console.log('');
-    console.log('⚠️  IMPORTANTE: Para receber mensagens, você precisa:');
-    console.log('');
-    console.log('1️⃣  Expor o servidor publicamente usando ngrok:');
-    console.log('   - Instale: brew install ngrok (ou baixe em ngrok.com)');
+app.listen(PORT, async () => {
+  // Inicializa categorias padrão ao iniciar o servidor
+  try {
+    await inicializarCategoriasPadrao();
+  } catch (error) {
+    console.error('⚠️  Erro ao inicializar categorias padrão:', error);
+  }
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`📡 API de autenticação: http://localhost:${PORT}/api/auth/login`);
+  console.log('');
+  console.log('📱 Interface Web:');
+  console.log(`   👉 http://localhost:${PORT}/app`);
+  console.log('');
+  console.log('📡 Endpoints:');
+  console.log(`   Webhook: http://localhost:${PORT}/webhook/whatsapp`);
+  console.log(`   Teste: http://localhost:${PORT}/test-webhook`);
+  console.log(`   Health: http://localhost:${PORT}/health`);
+  console.log('');
+  console.log('⚠️  IMPORTANTE: Para receber mensagens, você precisa:');
+  console.log('');
+  console.log('1️⃣  Expor o servidor publicamente usando ngrok:');
+  console.log('   - Instale: brew install ngrok (ou baixe em ngrok.com)');
   console.log('   - Execute: ngrok http 3000');
   console.log('   - Copie a URL HTTPS (ex: https://abc123.ngrok.io)');
   console.log('');
@@ -4203,10 +4373,10 @@ if (process.env.NODE_ENV !== 'test') {
   console.log('4️⃣  Verifique os logs do servidor quando enviar uma mensagem');
   console.log('   - Você deve ver: "🔔 WEBHOOK RECEBIDO DO TWILIO!"');
   console.log('');
-    console.log('5️⃣  Abra a interface web para ver as mensagens:');
-    console.log(`   👉 http://localhost:${PORT}/app`);
-    console.log('');
-  });
+  console.log('5️⃣  Abra a interface web para ver as mensagens:');
+  console.log(`   👉 http://localhost:${PORT}/app`);
+  console.log('');
+});
 }
 
 // Exporta o app para uso em testes

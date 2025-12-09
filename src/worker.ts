@@ -280,10 +280,14 @@ function limparTelefone(telefone?: string): string {
 }
 
 function formatarTelefone(telefone: string): string {
-  const telefoneLimpo = telefone.replace(/\D/g, '');
+  // Remove prefixos existentes
+  let telefoneLimpo = telefone.replace(/^whatsapp:/i, '').replace(/^\+/, '').trim();
+  // Remove todos os caracteres não numéricos
+  telefoneLimpo = telefoneLimpo.replace(/\D/g, '');
+  // Retorna no formato que será usado no banco (sem whatsapp:)
   return telefoneLimpo.startsWith('55') 
-    ? `whatsapp:+${telefoneLimpo}` 
-    : `whatsapp:+55${telefoneLimpo}`;
+    ? `+${telefoneLimpo}` 
+    : `+55${telefoneLimpo}`;
 }
 
 // Função auxiliar para criar variações com/sem dígito 9
@@ -1156,13 +1160,65 @@ app.post('/api/transacoes', async (c) => {
     
     const id = await salvarTransacao(c.env.financezap_db, transacao);
     
+    // Busca a transação criada diretamente do banco com a carteira incluída
+    const transacaoRow = await c.env.financezap_db
+      .prepare(
+        `SELECT 
+          t.id, 
+          t.telefone, 
+          t.descricao, 
+          t.valor, 
+          t.categoria, 
+          t.tipo, 
+          t.metodo, 
+          t.dataHora, 
+          t.data, 
+          t.mensagemOriginal,
+          t.carteiraId,
+          c.id as carteira_id,
+          c.nome as carteira_nome
+         FROM transacoes t
+         LEFT JOIN carteiras c ON t.carteiraId = c.id AND c.ativo = 1
+         WHERE t.id = ?`
+      )
+      .bind(id)
+      .first<any>();
+    
+    let transacaoCriada: any;
+    if (transacaoRow) {
+      transacaoCriada = {
+        id: transacaoRow.id,
+        telefone: transacaoRow.telefone,
+        descricao: transacaoRow.descricao,
+        valor: transacaoRow.valor,
+        categoria: transacaoRow.categoria,
+        tipo: transacaoRow.tipo === 'entrada' ? 'entrada' : 'saida',
+        metodo: transacaoRow.metodo === 'credito' ? 'credito' : 'debito',
+        dataHora: transacaoRow.dataHora,
+        data: transacaoRow.data,
+        mensagemOriginal: transacaoRow.mensagemOriginal ?? null,
+        carteiraId: transacaoRow.carteiraId ?? null,
+        carteira: transacaoRow.carteira_id ? {
+          id: transacaoRow.carteira_id,
+          nome: transacaoRow.carteira_nome,
+          tipo: transacaoRow.metodo === 'credito' ? 'credito' : 'debito',
+        } : null,
+      };
+    } else {
+      // Fallback se não encontrar
+      transacaoCriada = {
+        id,
+        ...transacao,
+        mensagemOriginal: null,
+        carteiraId: null,
+        carteira: null
+      };
+    }
+    
     return c.json({
       success: true,
       message: 'Transação criada com sucesso',
-      transacao: {
-        id,
-        ...transacao
-      }
+      transacao: transacaoCriada
     });
   } catch (error: any) {
     console.error('Erro em POST /api/transacoes:', error);
@@ -2959,13 +3015,52 @@ Sempre seja:
 - Use emojis quando apropriado para tornar a resposta mais amigável
 - SEMPRE dê exemplos práticos de mensagens que o usuário pode enviar
 
+⚠️ IMPORTANTE - QUANDO NÃO ENTENDER:
+Se você não entender a pergunta do usuário, não tente inventar uma resposta. Em vez disso, responda EXATAMENTE com esta mensagem amigável:
+"Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!"
+
 Dados financeiros do usuário:
 ${estatisticasTexto}
 
 Histórico de transações recentes:
 ${transacoesTexto || 'Nenhuma transação recente'}
 
-Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre finanças, use os dados fornecidos. Se for sobre a plataforma, explique como usar as funcionalidades do Zela e SEMPRE inclua exemplos práticos de mensagens que podem ser enviadas via WhatsApp.`;
+Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre finanças, use os dados fornecidos. Se for sobre a plataforma, explique como usar as funcionalidades do Zela e SEMPRE inclua exemplos práticos de mensagens que podem ser enviadas via WhatsApp. Se não entender, use a mensagem amigável especificada acima.`;
+
+    // Função auxiliar para verificar se a resposta indica que não entendeu
+    const verificarSeNaoEntendeu = (resposta: string): boolean => {
+      const respostaLower = resposta.toLowerCase();
+      const indicadoresNaoEntendeu = [
+        'não entendi',
+        'não compreendi',
+        'não consegui entender',
+        'não sei',
+        'não tenho certeza',
+        'não tenho informações',
+        'não posso ajudar',
+        'não consigo',
+        'desculpe, mas',
+        'lamento, mas',
+        'não tenho dados',
+        'não tenho acesso',
+        'não posso responder',
+        'não faço ideia',
+        'não tenho conhecimento'
+      ];
+      
+      // Verifica se a resposta contém algum indicador de não entendimento
+      const temIndicador = indicadoresNaoEntendeu.some(indicador => 
+        respostaLower.includes(indicador)
+      );
+      
+      // Também verifica se a resposta é muito curta ou genérica
+      const respostaMuitoCurta = resposta.trim().length < 30;
+      const respostaGenerica = respostaLower.includes('desculpe') && 
+                              (respostaLower.includes('não consegui') || 
+                               respostaLower.includes('não posso'));
+      
+      return temIndicador || (respostaMuitoCurta && respostaGenerica);
+    };
 
     // Verifica qual IA está disponível
     const temGroq = c.env.GROQ_API_KEY && c.env.GROQ_API_KEY.trim() !== '';
@@ -3007,7 +3102,15 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
         }
 
         const groqData = await groqResponse.json();
-        resposta = groqData.choices[0]?.message?.content || 'Desculpe, não consegui processar sua mensagem.';
+        const respostaGroq = groqData.choices[0]?.message?.content || '';
+        
+        // Verifica se a IA não entendeu e substitui por mensagem amigável
+        if (!respostaGroq || verificarSeNaoEntendeu(respostaGroq)) {
+          console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
+          resposta = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+        } else {
+          resposta = respostaGroq;
+        }
       } catch (error: any) {
         console.warn('⚠️  Erro ao usar Groq, tentando Gemini...', error.message);
         if (temGemini) {
@@ -3029,7 +3132,15 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
             }
 
             const geminiData = await geminiResponse.json();
-            resposta = geminiData.candidates[0]?.content?.parts[0]?.text || 'Desculpe, não consegui processar sua mensagem.';
+            const respostaGemini = geminiData.candidates[0]?.content?.parts[0]?.text || '';
+            
+            // Verifica se a IA não entendeu e substitui por mensagem amigável
+            if (!respostaGemini || verificarSeNaoEntendeu(respostaGemini)) {
+              console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
+              resposta = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+            } else {
+              resposta = respostaGemini;
+            }
           } catch (geminiError: any) {
             throw new Error(`Erro ao processar com ambas as IAs: ${error.message}`);
           }
@@ -3056,7 +3167,15 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
         }
 
         const geminiData = await geminiResponse.json();
-        resposta = geminiData.candidates[0]?.content?.parts[0]?.text || 'Desculpe, não consegui processar sua mensagem.';
+        const respostaGemini = geminiData.candidates[0]?.content?.parts[0]?.text || '';
+        
+        // Verifica se a IA não entendeu e substitui por mensagem amigável
+        if (!respostaGemini || verificarSeNaoEntendeu(respostaGemini)) {
+          console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
+          resposta = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+        } else {
+          resposta = respostaGemini;
+        }
       } catch (error: any) {
         console.error('❌ Erro ao processar com Gemini:', error);
         throw error;
@@ -3198,10 +3317,12 @@ app.post('/webhook/zapi', async (c) => {
             // Se Gemini falhou e temos Groq, tenta Groq
             if (error.message === 'GEMINI_QUOTA_EXCEEDED' && groqApiKey) {
               console.log('🔄 Tentando transcrição com Groq...');
-              // Groq não suporta áudio diretamente, então retorna erro
+              // Groq não suporta áudio diretamente, então envia mensagem amigável
+              const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+              await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
               return c.json({ 
                 success: false, 
-                error: 'Quota do Gemini excedida. Groq não suporta transcrição de áudio. Por favor, envie uma mensagem de texto ou aguarde alguns minutos.' 
+                error: 'Quota do Gemini excedida' 
               }, 400);
             }
             
@@ -3210,29 +3331,44 @@ app.post('/webhook/zapi', async (c) => {
               throw error;
             }
             
+            // Envia mensagem amigável quando transcrição está vazia
+            const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+            await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
             return c.json({ 
               success: false, 
-              error: 'Não consegui entender o áudio. Por favor, envie uma mensagem de texto.' 
+              error: 'Transcrição vazia' 
             }, 400);
           }
         } else if (!geminiApiKey && !groqApiKey) {
           console.log('⚠️ Nenhuma IA configurada para transcrição de áudio');
+          const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+          await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
           return c.json({ 
             success: false, 
-            error: 'Transcrição de áudio não configurada. Por favor, envie uma mensagem de texto.' 
+            error: 'Transcrição não configurada' 
           }, 400);
         } else {
           // Groq não suporta áudio diretamente
+          const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+          await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
           return c.json({ 
             success: false, 
-            error: 'Groq não suporta transcrição de áudio. Por favor, envie uma mensagem de texto ou configure o Gemini.' 
+            error: 'Groq não suporta transcrição de áudio' 
           }, 400);
         }
       } catch (error: any) {
         console.error('❌ Erro ao processar áudio:', error);
+        const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+        
+        try {
+          await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
+        } catch (envioError: any) {
+          console.error('❌ Erro ao enviar mensagem amigável:', envioError.message);
+        }
+        
         return c.json({ 
           success: false, 
-          error: `Erro ao processar áudio: ${error.message}. Por favor, envie uma mensagem de texto.` 
+          error: 'Erro ao processar áudio' 
         }, 400);
       }
     }
@@ -3321,9 +3457,10 @@ app.post('/webhook/zapi', async (c) => {
         return c.json({ success: true, message: `Relatório ${tipoRelatorio} enviado com sucesso` });
       } catch (error: any) {
         console.error('❌ Erro ao gerar relatório:', error);
+        const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
         await enviarMensagemZApi(
           telefoneFormatado,
-          '❌ Erro ao gerar relatório. Por favor, tente novamente.',
+          mensagemAmigavel,
           c.env
         );
         // Continua o processamento se houver erro
@@ -3545,10 +3682,20 @@ app.post('/webhook/zapi', async (c) => {
         console.log('✅ Confirmação enviada para:', telefoneFormatado);
       } else {
         console.log('⚠️ Nenhuma transação financeira encontrada na mensagem');
-        // Não envia resposta se não encontrar transação (evita spam)
+        // Envia mensagem amigável quando não entende
+        const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+        await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
       }
     } catch (error: any) {
       console.error('❌ Erro ao processar mensagem com IA:', error.message);
+      // Envia mensagem amigável em caso de erro
+      const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+      
+      try {
+        await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
+      } catch (envioError: any) {
+        console.error('❌ Erro ao enviar mensagem amigável:', envioError.message);
+      }
       // Fallback: tenta salvar como transação básica se a IA falhar
       const valorMatch = messageText.match(/(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/i);
       const valor = valorMatch ? parseFloat(valorMatch[1].replace(',', '.')) : 0;

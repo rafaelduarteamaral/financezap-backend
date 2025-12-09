@@ -195,13 +195,17 @@ Sempre seja:
 - Claro nas explicações
 - Use emojis quando apropriado para tornar a resposta mais amigável
 
+⚠️ IMPORTANTE - QUANDO NÃO ENTENDER:
+Se você não entender a pergunta do usuário, não tente inventar uma resposta. Em vez disso, responda EXATAMENTE com esta mensagem amigável:
+"Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!"
+
 Dados financeiros do usuário:
 {ESTATISTICAS}
 
 Histórico de transações recentes:
 {TRANSACOES}
 
-Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre finanças, use os dados fornecidos. Se for sobre a plataforma, use o conhecimento acima.`;
+Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre finanças, use os dados fornecidos. Se for sobre a plataforma, use o conhecimento acima. Se não entender, use a mensagem amigável especificada acima.`;
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -297,6 +301,41 @@ export async function processarChatFinanceiro(
   throw new Error('Nenhuma IA disponível');
 }
 
+// Função auxiliar para verificar se a resposta indica que não entendeu
+function verificarSeNaoEntendeu(resposta: string): boolean {
+  const respostaLower = resposta.toLowerCase();
+  const indicadoresNaoEntendeu = [
+    'não entendi',
+    'não compreendi',
+    'não consegui entender',
+    'não sei',
+    'não tenho certeza',
+    'não tenho informações',
+    'não posso ajudar',
+    'não consigo',
+    'desculpe, mas',
+    'lamento, mas',
+    'não tenho dados',
+    'não tenho acesso',
+    'não posso responder',
+    'não faço ideia',
+    'não tenho conhecimento'
+  ];
+  
+  // Verifica se a resposta contém algum indicador de não entendimento
+  const temIndicador = indicadoresNaoEntendeu.some(indicador => 
+    respostaLower.includes(indicador)
+  );
+  
+  // Também verifica se a resposta é muito curta ou genérica
+  const respostaMuitoCurta = resposta.trim().length < 30;
+  const respostaGenerica = respostaLower.includes('desculpe') && 
+                          (respostaLower.includes('não consegui') || 
+                           respostaLower.includes('não posso'));
+  
+  return temIndicador || (respostaMuitoCurta && respostaGenerica);
+}
+
 async function processarComGroq(mensagem: string, contexto: string): Promise<string> {
   if (!groq) throw new Error('Groq não inicializado');
 
@@ -318,7 +357,15 @@ async function processarComGroq(mensagem: string, contexto: string): Promise<str
       max_tokens: 1000
     });
 
-    return completion.choices[0]?.message?.content || 'Desculpe, não consegui processar sua mensagem.';
+    const resposta = completion.choices[0]?.message?.content || '';
+    
+    // Verifica se a IA não entendeu e substitui por mensagem amigável
+    if (!resposta || verificarSeNaoEntendeu(resposta)) {
+      console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
+      return 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+    }
+    
+    return resposta;
   } catch (error: any) {
     console.error('❌ Erro ao processar com Groq:', error.message);
     throw error;
@@ -337,7 +384,15 @@ async function processarComGemini(mensagem: string, contexto: string): Promise<s
       contents: promptCompleto,
     });
     
-    return response.text || 'Desculpe, não consegui processar sua mensagem.';
+    const resposta = response.text || '';
+    
+    // Verifica se a IA não entendeu e substitui por mensagem amigável
+    if (!resposta || verificarSeNaoEntendeu(resposta)) {
+      console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
+      return 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+    }
+    
+    return resposta;
   } catch (error: any) {
     console.error('❌ Erro ao processar com Gemini:', error.message);
     throw error;
