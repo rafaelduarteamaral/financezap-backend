@@ -11,6 +11,7 @@ export type IntencaoUsuario =
   | 'edicao'
   | 'ajuda'
   | 'resumo'
+  | 'saldo'
   | 'listagem'
   | 'desconhecida';
 
@@ -59,14 +60,29 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     return { intencao: 'ajuda', confianca: 0.85 };
   }
 
-  // 4. Verifica se é pedido de resumo/estatísticas
+  // 4. Verifica se é pedido de saldo específico
+  const palavrasSaldo = [
+    'meu saldo',
+    'saldo total',
+    'saldo atual',
+    'quanto tenho',
+    'quanto eu tenho',
+    'meu dinheiro',
+    'saldo das carteiras',
+    'saldo de todas as carteiras',
+    'saldo de todas carteiras',
+  ];
+  if (palavrasSaldo.some(palavra => mensagemLower.includes(palavra))) {
+    return { intencao: 'saldo', confianca: 0.9 };
+  }
+
+  // 5. Verifica se é pedido de resumo/estatísticas
   const palavrasResumo = [
     'resumo',
     'estatísticas',
     'estatisticas',
     'saldo',
     'quanto gastei',
-    'quanto tenho',
     'situação financeira',
     'dashboard',
     'relatório',
@@ -76,7 +92,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     return { intencao: 'resumo', confianca: 0.85 };
   }
 
-  // 5. Verifica se é listagem de agendamentos
+  // 6. Verifica se é listagem de agendamentos
   const palavrasListagem = [
     'listar agendamentos',
     'meus agendamentos',
@@ -92,7 +108,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     return { intencao: 'listagem', confianca: 0.85 };
   }
 
-  // 6. Verifica se é agendamento
+  // 7. Verifica se é agendamento
   const palavrasAgendamento = [
     'agende',
     'agendar',
@@ -191,7 +207,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     return { intencao: 'pergunta', confianca: 0.7 };
   }
 
-  // 10. Se tem valor mas não tem contexto claro, pode ser transação
+  // 11. Se tem valor mas não tem contexto claro, pode ser transação
   if (temValor) {
     return {
       intencao: 'transacao',
@@ -200,7 +216,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     };
   }
 
-  // 11. Desconhecida
+  // 12. Desconhecida
   return { intencao: 'desconhecida', confianca: 0.3 };
 }
 

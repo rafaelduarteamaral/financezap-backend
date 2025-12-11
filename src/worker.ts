@@ -84,6 +84,10 @@ import {
   formatarMoeda
 } from './formatadorMensagens';
 import {
+  calcularSaldoPorCarteiraD1,
+  formatarMensagemSaldo
+} from './saldos';
+import {
   calcularScoreMedio,
   devePedirConfirmacao,
   devePedirMaisInformacoes
@@ -3842,6 +3846,32 @@ app.post('/webhook/zapi', async (c) => {
       }
       
       return c.json({ success: true, message: 'Ajuda enviada' });
+    }
+    
+    // MELHORIA: Processa pedido de saldo (saldo total e por carteira)
+    if (intencao.intencao === 'saldo') {
+      console.log('💰 Solicitação de saldo detectada!');
+      
+      // Calcula saldo por carteira
+      const saldoTotal = await calcularSaldoPorCarteiraD1(c.env.financezap_db, telefoneFormatado);
+      
+      // Formata mensagem
+      const resposta = formatarMensagemSaldo(saldoTotal);
+      
+      // Adiciona ao contexto
+      await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+      
+      // Divide mensagem se necessário
+      const mensagens = dividirMensagem(resposta);
+      
+      for (const msg of mensagens) {
+        await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+      }
+      
+      return c.json({ 
+        success: true, 
+        message: 'Saldo enviado com sucesso' 
+      });
     }
     
     // Se não foi agendamento, processa como transação usando IA

@@ -40,6 +40,10 @@ import {
   formatarMoeda
 } from './formatadorMensagens';
 import {
+  calcularSaldoPorCarteira,
+  formatarMensagemSaldo
+} from './saldos';
+import {
   calcularScoreMedio,
   devePedirConfirmacao,
   devePedirMaisInformacoes
@@ -1038,6 +1042,50 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
           }
           
           return res.json({ success: true, message: 'Ajuda enviada' });
+        }
+        
+        // MELHORIA: Processa pedido de saldo (saldo total e por carteira)
+        if (intencao.intencao === 'saldo') {
+          console.log('💰 Solicitação de saldo detectada!');
+          
+          const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
+            ? cleanFromNumber 
+            : cleanFromNumber.startsWith('+')
+            ? `whatsapp:${cleanFromNumber}`
+            : `whatsapp:+${cleanFromNumber}`;
+          
+          // Calcula saldo por carteira
+          const saldoTotal = await calcularSaldoPorCarteira(telefoneFormatado);
+          
+          // Formata mensagem
+          const resposta = formatarMensagemSaldo(saldoTotal);
+          
+          // Adiciona ao contexto
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', resposta);
+          
+          // Divide mensagem se necessário
+          const mensagens = dividirMensagem(resposta);
+          
+          for (const msg of mensagens) {
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, msg);
+            } else if (twilioWhatsAppNumber) {
+              try {
+                await client.messages.create({
+                  from: twilioWhatsAppNumber,
+                  to: fromNumber,
+                  body: msg
+                });
+              } catch (error: any) {
+                console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
+              }
+            }
+          }
+          
+          return res.json({ 
+            success: true, 
+            message: 'Saldo enviado com sucesso' 
+          });
         }
         
         // Verifica se é solicitação de listagem de agendamentos

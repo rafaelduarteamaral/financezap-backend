@@ -2038,6 +2038,9 @@ export interface CarteiraRecord {
   telefone: string;
   nome: string;
   descricao?: string | null;
+  tipo?: string; // "debito" ou "credito"
+  limiteCredito?: number | null;
+  diaPagamento?: number | null;
   padrao: number; // 0 = false, 1 = true
   ativo: number; // 0 = false, 1 = true
   criadoEm: string;
