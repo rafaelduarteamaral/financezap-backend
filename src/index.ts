@@ -3865,7 +3865,7 @@ app.post('/api/agendamentos', autenticarMiddleware, validarPermissaoDados, async
 app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
   try {
     const { id } = req.params;
-    const { status, descricao, valor, dataAgendamento, tipo, categoria } = req.body;
+    const { status, descricao, valor, dataAgendamento, tipo, categoria, carteiraId, valorPago } = req.body;
     const telefone = req.telefone;
 
     if (!telefone) {
@@ -3959,18 +3959,38 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
     }
 
     // Se marcou como pago, cria transação automaticamente
+    // Se carteiraId e valorPago foram fornecidos, usa esses valores (vem do frontend)
+    // Caso contrário, usa valores padrão (compatibilidade com WhatsApp)
     if (status === 'pago') {
       const dataAtual = new Date().toISOString().split('T')[0];
+      const valorTransacao = valorPago || agendamento.valor;
+      
+      // Determina método baseado na carteira se fornecida
+      let metodoTransacao = 'debito';
+      if (carteiraId) {
+        try {
+          const { buscarCarteiraPorId } = await import('./carteiras');
+          const carteira = await buscarCarteiraPorId(carteiraId, telefone);
+          if (carteira && carteira.tipo === 'credito') {
+            metodoTransacao = 'credito';
+          }
+        } catch (error) {
+          console.error('Erro ao buscar carteira:', error);
+          // Mantém débito como padrão
+        }
+      }
+      
       const transacao: Transacao = {
         telefone: telefone,
         descricao: agendamento.descricao,
-        valor: agendamento.valor,
+        valor: valorTransacao,
         categoria: agendamento.categoria || 'outros',
         tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
-        metodo: 'debito',
+        metodo: metodoTransacao,
         dataHora: new Date().toLocaleString('pt-BR'),
         data: dataAtual,
-        mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`
+        mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
+        carteiraId: carteiraId || null,
       };
 
       await salvarTransacao(transacao);

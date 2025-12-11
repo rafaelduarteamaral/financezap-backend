@@ -1,5 +1,17 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+
+// Tipos para Scheduled Events
+interface ScheduledEvent {
+  type: 'scheduled';
+  scheduledTime: number;
+  cron: string;
+}
+
+interface ExecutionContext {
+  waitUntil(promise: Promise<any>): void;
+  passThroughOnException(): void;
+}
 import {
   buscarTransacoes,
   calcularEstatisticas,
@@ -2757,7 +2769,7 @@ app.put('/api/agendamentos/:id', async (c) => {
     
     const id = Number(c.req.param('id'));
     const body = await c.req.json();
-    const { status, descricao, valor, dataAgendamento, tipo, categoria } = body;
+    const { status, descricao, valor, dataAgendamento, tipo, categoria, carteiraId, valorPago } = body;
     
     // Se apenas status foi enviado, usa a função antiga
     if (status && !descricao && !valor && !dataAgendamento && !tipo && !categoria) {
@@ -2823,18 +2835,38 @@ app.put('/api/agendamentos/:id', async (c) => {
     await atualizarStatusAgendamentoD1(c.env.financezap_db, id, status);
     
     // Se marcou como pago, cria transação automaticamente
+    // Se carteiraId e valorPago foram fornecidos, usa esses valores (vem do frontend)
+    // Caso contrário, usa valores padrão (compatibilidade com WhatsApp)
     if (status === 'pago') {
       const dataAtual = new Date().toISOString().split('T')[0];
+      const valorTransacao = valorPago || agendamento.valor;
+      
+      // Determina método baseado na carteira se fornecida
+      let metodoTransacao = 'debito';
+      if (carteiraId) {
+        try {
+          const { buscarCarteiraPorIdD1 } = await import('./d1');
+          const carteira = await buscarCarteiraPorIdD1(c.env.financezap_db, carteiraId, telefoneFormatado);
+          if (carteira && carteira.tipo === 'credito') {
+            metodoTransacao = 'credito';
+          }
+        } catch (error) {
+          console.error('Erro ao buscar carteira:', error);
+          // Mantém débito como padrão
+        }
+      }
+      
       const transacaoId = await salvarTransacao(c.env.financezap_db, {
         telefone: telefoneFormatado,
         descricao: agendamento.descricao,
-        valor: agendamento.valor,
+        valor: valorTransacao,
         categoria: agendamento.categoria || 'outros',
         tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
-        metodo: 'debito',
+        metodo: metodoTransacao,
         dataHora: new Date().toISOString(),
         data: dataAtual,
-        mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`
+        mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
+        carteiraId: carteiraId || null,
       });
       
       // SSE desabilitado - usando apenas botão de atualizar manual
@@ -3901,4 +3933,100 @@ app.post('/webhook/zapi', async (c) => {
   }
 });
 
-export default app;
+// Scheduled handler para notificações automáticas de agendamentos
+export default {
+  fetch: app.fetch,
+  async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(processarNotificacoesAgendamentos(env));
+  },
+};
+
+async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
+  try {
+    console.log('🔔 Iniciando processamento de notificações de agendamentos...');
+    
+    const hoje = new Date().toISOString().split('T')[0];
+    console.log(`📅 Buscando agendamentos para: ${hoje}`);
+    
+    // Busca todos os agendamentos pendentes do dia que ainda não foram notificados
+    const query = `
+      SELECT * FROM agendamentos 
+      WHERE dataAgendamento = ? 
+        AND status = 'pendente' 
+        AND notificado = 0
+      ORDER BY dataAgendamento ASC
+    `;
+    
+    const result = await env.financezap_db.prepare(query).bind(hoje).all<AgendamentoRecord>();
+    const agendamentos = result.results || [];
+    
+    console.log(`📋 Encontrados ${agendamentos.length} agendamentos para notificar`);
+    
+    if (agendamentos.length === 0) {
+      return;
+    }
+    
+    // Agrupa por telefone para enviar uma mensagem consolidada
+    const agendamentosPorTelefone = new Map<string, AgendamentoRecord[]>();
+    agendamentos.forEach(ag => {
+      if (!agendamentosPorTelefone.has(ag.telefone)) {
+        agendamentosPorTelefone.set(ag.telefone, []);
+      }
+      agendamentosPorTelefone.get(ag.telefone)!.push(ag);
+    });
+    
+    // Envia notificação para cada telefone
+    for (const [telefone, ags] of agendamentosPorTelefone.entries()) {
+      try {
+        let mensagem = `🔔 *Lembrete de Agendamentos - ${new Date().toLocaleDateString('pt-BR')}*\n\n`;
+        
+        if (ags.length === 1) {
+          const ag = ags[0];
+          mensagem += `📋 *${ag.descricao}*\n`;
+          mensagem += `💰 R$ ${ag.valor.toFixed(2)}\n`;
+          mensagem += `📅 ${new Date(ag.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR')}\n`;
+          mensagem += `📝 ${ag.tipo === 'pagamento' ? 'Pagamento' : 'Recebimento'}\n\n`;
+          if (ag.recorrente === 1 && ag.parcelaAtual && ag.totalParcelas) {
+            mensagem += `📊 Parcela ${ag.parcelaAtual} de ${ag.totalParcelas}\n\n`;
+          }
+        } else {
+          mensagem += `Você tem ${ags.length} agendamentos hoje:\n\n`;
+          ags.forEach((ag, index) => {
+            mensagem += `${index + 1}. *${ag.descricao}*\n`;
+            mensagem += `   💰 R$ ${ag.valor.toFixed(2)}\n`;
+            if (ag.recorrente === 1 && ag.parcelaAtual && ag.totalParcelas) {
+              mensagem += `   📊 Parcela ${ag.parcelaAtual}/${ag.totalParcelas}\n`;
+            }
+            mensagem += `\n`;
+          });
+        }
+        
+        mensagem += `💡 Use o botão abaixo para marcar como pago ou acesse o app.`;
+        
+        // Envia mensagem via Z-API ou Twilio
+        if (env.ZAPI_INSTANCE_ID && env.ZAPI_TOKEN && env.ZAPI_CLIENT_TOKEN) {
+          await enviarMensagemZApi(telefone, mensagem, env);
+        } else if (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_WHATSAPP_NUMBER) {
+          // Implementar envio via Twilio se necessário
+          console.log('⚠️ Twilio não implementado para notificações automáticas');
+        }
+        
+        // Marca como notificado
+        for (const ag of ags) {
+          await env.financezap_db
+            .prepare('UPDATE agendamentos SET notificado = 1 WHERE id = ?')
+            .bind(ag.id)
+            .run();
+        }
+        
+        console.log(`✅ Notificação enviada para ${telefone} (${ags.length} agendamento(s))`);
+      } catch (error: any) {
+        console.error(`❌ Erro ao enviar notificação para ${telefone}:`, error);
+      }
+    }
+    
+    console.log('✅ Processamento de notificações concluído');
+  } catch (error: any) {
+    console.error('❌ Erro ao processar notificações de agendamentos:', error);
+  }
+}

@@ -32,3 +32,8 @@ invocation_logs = true
 enabled = false
 persist = true
 head_sampling_rate = 1
+
+# Cron Triggers - Notificações automáticas de agendamentos
+# Executa diariamente às 8h (horário UTC)
+[[triggers.crons]]
+cron = "0 8 * * *"
