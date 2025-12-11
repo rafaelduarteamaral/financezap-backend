@@ -34,6 +34,10 @@ import {
   formatarMensagemSaldo
 } from './saldos';
 import {
+  formatarMensagemTransacao,
+  formatarMensagemMultiplasTransacoes
+} from './formatadorTransacoes';
+import {
   calcularScoreMedio,
   devePedirConfirmacao,
   devePedirMaisInformacoes
@@ -1392,6 +1396,15 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
             
             const idsSalvos: number[] = [];
             const dataAtual = new Date().toISOString().split('T')[0];
+            const transacoesSalvas: Array<{
+              descricao: string;
+              valor: number;
+              categoria: string;
+              tipo: 'entrada' | 'saida';
+              metodo: 'credito' | 'debito';
+              carteiraId: number | null;
+              carteiraNome?: string;
+            }> = [];
             
             for (const transacaoExtraida of transacoesExtraidas) {
               try {
@@ -1403,6 +1416,8 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                 
                 // Busca ou cria carteira apropriada
                 let carteiraIdParaTransacao: number | null = null;
+                let carteiraNome: string | undefined = undefined;
+                
                 if (transacaoExtraida.carteiraNome) {
                   const carteirasUsuario = await buscarCarteirasPorTelefone(telefoneFormatado);
                   const carteiraEncontrada = carteirasUsuario.find(c => 
@@ -1411,12 +1426,14 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                   );
                   if (carteiraEncontrada && carteiraEncontrada.tipo === tipoCarteiraNecessario) {
                     carteiraIdParaTransacao = carteiraEncontrada.id;
+                    carteiraNome = carteiraEncontrada.nome;
                   }
                 }
                 
                 if (!carteiraIdParaTransacao) {
                   const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
                   carteiraIdParaTransacao = carteiraApropriada.id;
+                  carteiraNome = carteiraApropriada.nome;
                 }
                 
                 const transacao: Transacao = {
@@ -1434,27 +1451,50 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                 
                 const id = await salvarTransacao(transacao);
                 idsSalvos.push(id);
+                
+                // Armazena dados para formatação da mensagem
+                transacoesSalvas.push({
+                  descricao: transacaoExtraida.descricao,
+                  valor: transacaoExtraida.valor,
+                  categoria: transacaoExtraida.categoria || 'outros',
+                  tipo: tipoFinal,
+                  metodo: transacaoExtraida.metodo || 'debito',
+                  carteiraId: carteiraIdParaTransacao,
+                  carteiraNome: carteiraNome
+                });
+                
                 console.log(`✅ Transação salva (ID: ${id}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
               } catch (error: any) {
                 console.error(`❌ Erro ao salvar transação: ${error.message}`);
               }
             }
             
-            // Formata mensagem simplificada
+            // Formata mensagem com informações completas
             let resposta = '';
-            if (transacoesExtraidas.length === 1) {
-              const t = transacoesExtraidas[0];
-              const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
-              resposta = `✅ Transação registrada!\n\n`;
-              resposta += `${tipoEmoji} ${t.descricao}\n`;
-              resposta += `💰 R$ ${t.valor.toFixed(2)}\n`;
-              resposta += `🏷️ ${t.categoria}`;
-            } else {
-              resposta = `✅ ${transacoesExtraidas.length} transações registradas!\n\n`;
-              transacoesExtraidas.forEach((t, index) => {
-                const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
-                resposta += `${index + 1}. ${tipoEmoji} ${t.descricao} - R$ ${t.valor.toFixed(2)}\n`;
+            
+            if (transacoesSalvas.length === 1) {
+              const t = transacoesSalvas[0];
+              resposta = formatarMensagemTransacao({
+                descricao: t.descricao,
+                valor: t.valor,
+                categoria: t.categoria,
+                tipo: t.tipo,
+                metodo: t.metodo,
+                carteiraNome: t.carteiraNome,
+                data: dataAtual
               });
+            } else {
+              resposta = formatarMensagemMultiplasTransacoes(
+                transacoesSalvas.map(t => ({
+                  descricao: t.descricao,
+                  valor: t.valor,
+                  categoria: t.categoria,
+                  tipo: t.tipo,
+                  metodo: t.metodo,
+                  carteiraNome: t.carteiraNome,
+                  data: dataAtual
+                }))
+              );
             }
             
             // Adiciona ao contexto

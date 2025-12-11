@@ -78,6 +78,10 @@ import {
   formatarMensagemSaldo
 } from './saldos';
 import {
+  formatarMensagemTransacao,
+  formatarMensagemMultiplasTransacoes
+} from './formatadorTransacoes';
+import {
   calcularScoreMedio,
   devePedirConfirmacao,
   devePedirMaisInformacoes
@@ -3810,6 +3814,14 @@ app.post('/webhook/zapi', async (c) => {
           const dataHora = new Date().toISOString();
           const data = dataHora.slice(0, 10);
           const idsSalvos: number[] = [];
+          const transacoesSalvas: Array<{
+            descricao: string;
+            valor: number;
+            categoria: string;
+            tipo: 'entrada' | 'saida';
+            metodo: 'credito' | 'debito';
+            carteiraNome?: string;
+          }> = [];
           
           for (const transacaoExtraida of transacoesExtraidas) {
             try {
@@ -3822,6 +3834,7 @@ app.post('/webhook/zapi', async (c) => {
               // Busca ou cria carteira apropriada
               const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
               let carteiraId: number | null = null;
+              let carteiraNome: string | undefined = undefined;
               
               const tipoNome = tipoCarteiraNecessario === 'credito' ? 'Crédito' : 'Débito';
               const carteiraEncontrada = carteiras.find(c => 
@@ -3831,8 +3844,10 @@ app.post('/webhook/zapi', async (c) => {
               
               if (carteiraEncontrada && carteiraEncontrada.id) {
                 carteiraId = carteiraEncontrada.id;
+                carteiraNome = carteiraEncontrada.nome;
               } else if (carteiras.length > 0 && carteiras[0].id) {
                 carteiraId = carteiras[0].id;
+                carteiraNome = carteiras[0].nome;
               } else {
                 const novaCarteiraId = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
                   nome: tipoCarteiraNecessario === 'credito' ? 'Cartão de Crédito' : 'Cartão de Débito',
@@ -3840,6 +3855,11 @@ app.post('/webhook/zapi', async (c) => {
                   padrao: false
                 });
                 carteiraId = novaCarteiraId;
+                // Busca a carteira criada para obter o nome
+                const carteiraCriada = await buscarCarteiraPorIdD1(c.env.financezap_db, novaCarteiraId, telefoneFormatado);
+                if (carteiraCriada) {
+                  carteiraNome = carteiraCriada.nome;
+                }
               }
               
               const transacaoId = await salvarTransacao(c.env.financezap_db, {
@@ -3856,27 +3876,49 @@ app.post('/webhook/zapi', async (c) => {
               });
               
               idsSalvos.push(transacaoId);
+              
+              // Armazena dados para formatação da mensagem
+              transacoesSalvas.push({
+                descricao: transacaoExtraida.descricao,
+                valor: transacaoExtraida.valor,
+                categoria: transacaoExtraida.categoria || 'outros',
+                tipo: tipoFinal,
+                metodo: (transacaoExtraida.metodo && transacaoExtraida.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito',
+                carteiraNome: carteiraNome
+              });
+              
               console.log(`✅ Transação salva (ID: ${transacaoId}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
             } catch (error: any) {
               console.error(`❌ Erro ao salvar transação: ${error.message}`);
             }
           }
           
-          // Formata mensagem simplificada
+          // Formata mensagem com informações completas
           let resposta = '';
-          if (transacoesExtraidas.length === 1) {
-            const t = transacoesExtraidas[0];
-            const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
-            resposta = `✅ Transação registrada!\n\n`;
-            resposta += `${tipoEmoji} ${t.descricao}\n`;
-            resposta += `💰 R$ ${t.valor.toFixed(2)}\n`;
-            resposta += `🏷️ ${t.categoria}`;
-          } else {
-            resposta = `✅ ${transacoesExtraidas.length} transações registradas!\n\n`;
-            transacoesExtraidas.forEach((t, index) => {
-              const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
-              resposta += `${index + 1}. ${tipoEmoji} ${t.descricao} - R$ ${t.valor.toFixed(2)}\n`;
+          
+          if (transacoesSalvas.length === 1) {
+            const t = transacoesSalvas[0];
+            resposta = formatarMensagemTransacao({
+              descricao: t.descricao,
+              valor: t.valor,
+              categoria: t.categoria,
+              tipo: t.tipo,
+              metodo: t.metodo,
+              carteiraNome: t.carteiraNome,
+              data: data
             });
+          } else {
+            resposta = formatarMensagemMultiplasTransacoes(
+              transacoesSalvas.map(t => ({
+                descricao: t.descricao,
+                valor: t.valor,
+                categoria: t.categoria,
+                tipo: t.tipo,
+                metodo: t.metodo,
+                carteiraNome: t.carteiraNome,
+                data: data
+              }))
+            );
           }
           
           // Adiciona ao contexto
@@ -4015,14 +4057,29 @@ app.post('/webhook/zapi', async (c) => {
           return resultado.split('').reverse().join('');
         };
         
-        // Formata mensagem simplificada
-        const tipoEmoji = tipo === 'entrada' ? '💰' : '💸';
-        const descricaoCompleta = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
+        // Busca nome da carteira se houver
+        let carteiraNome: string | undefined = undefined;
+        try {
+          // Tenta buscar a última carteira usada ou padrão
+          const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+          if (carteiras.length > 0) {
+            carteiraNome = carteiras[0].nome;
+          }
+        } catch (error) {
+          console.warn('⚠️ Erro ao buscar nome da carteira:', error);
+        }
         
-        let resposta = `✅ Transação registrada!\n\n`;
-        resposta += `${tipoEmoji} ${descricaoCompleta}\n`;
-        resposta += `💰 R$ ${valor.toFixed(2)}\n`;
-        resposta += `🏷️ outros`;
+        // Formata mensagem com informações completas
+        const descricaoCompleta = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
+        const resposta = formatarMensagemTransacao({
+          descricao: descricaoCompleta,
+          valor: valor,
+          categoria: 'outros',
+          tipo: tipo,
+          metodo: 'debito',
+          carteiraNome: carteiraNome,
+          data: data
+        });
         
         await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
       }
