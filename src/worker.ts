@@ -4045,18 +4045,6 @@ app.post('/webhook/zapi', async (c) => {
         //   mensagem: 'Nova transação registrada'
         // }, c.env.financezap_db);
         
-        // Função para gerar identificador único (ex: AQTXU)
-        const gerarIdentificador = (id: number): string => {
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-          let resultado = '';
-          let num = id;
-          for (let i = 0; i < 5; i++) {
-            resultado += chars[num % chars.length];
-            num = Math.floor(num / chars.length);
-          }
-          return resultado.split('').reverse().join('');
-        };
-        
         // Busca nome da carteira se houver
         let carteiraNome: string | undefined = undefined;
         try {

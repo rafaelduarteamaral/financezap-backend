@@ -506,27 +506,68 @@ app.post('/webhook/whatsapp', async (req, res) => {
         }
       }
       
-      // Calcula total do cliente
-      const total = await calcularTotalPorTelefone(cleanFromNumber);
-      console.log(`   📊 Total gasto: R$ ${total.toFixed(2)}`);
+      // Formata mensagem com informações completas usando o formatador
+      const transacoesSalvas: Array<{
+        descricao: string;
+        valor: number;
+        categoria: string;
+        tipo: 'entrada' | 'saida';
+        metodo: 'credito' | 'debito';
+        carteiraNome?: string;
+        data: string;
+      }> = [];
       
-      // Responde ao cliente com confirmação detalhada
+      // Coleta dados das transações salvas
+      for (const transacaoExtraida of transacoesExtraidas) {
+        if (transacaoExtraida.sucesso) {
+          const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
+            ? 'entrada' 
+            : 'saida';
+          
+          // Busca nome da carteira
+          let carteiraNome: string | undefined = undefined;
+          let carteiraId: number | null = null;
+          
+          if (transacaoExtraida.carteiraNome) {
+            const carteiras = await buscarCarteirasPorTelefone(cleanFromNumber);
+            const carteiraEncontrada = carteiras.find(
+              c => c.nome.toLowerCase().includes(transacaoExtraida.carteiraNome!.toLowerCase()) ||
+                   transacaoExtraida.carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
+            );
+            if (carteiraEncontrada) {
+              carteiraId = carteiraEncontrada.id;
+              carteiraNome = carteiraEncontrada.nome;
+            }
+          }
+          
+          if (!carteiraId) {
+            const carteiraPadrao = await buscarCarteiraPadrao(cleanFromNumber);
+            if (carteiraPadrao) {
+              carteiraId = carteiraPadrao.id;
+              carteiraNome = carteiraPadrao.nome;
+            }
+          }
+          
+          const dataAtual = new Date().toISOString().split('T')[0];
+          
+          transacoesSalvas.push({
+            descricao: transacaoExtraida.descricao,
+            valor: transacaoExtraida.valor,
+            categoria: transacaoExtraida.categoria || 'outros',
+            tipo: tipoFinal,
+            metodo: (transacaoExtraida.metodo || 'debito') as 'credito' | 'debito',
+            carteiraNome: carteiraNome,
+            data: dataAtual
+          });
+        }
+      }
+      
+      // Formata resposta usando o formatador
       let resposta = '';
-      if (transacoesExtraidas.length === 1) {
-        const t = transacoesExtraidas[0];
-        resposta = `✅ Transação registrada com sucesso!\n\n`;
-        resposta += `📝 ${t.descricao}\n`;
-        resposta += `💰 Valor: R$ ${t.valor.toFixed(2)}\n`;
-        resposta += `🏷️  Categoria: ${t.categoria}\n`;
-        resposta += `📊 Tipo: ${t.tipo === 'entrada' ? 'Entrada' : 'Saída'}\n`;
-        resposta += `💳 Método: ${t.metodo === 'credito' ? 'Crédito' : 'Débito'}\n`;
-        resposta += `📊 Total acumulado: R$ ${total.toFixed(2)}`;
-      } else {
-        resposta = `✅ ${transacoesExtraidas.length} transações registradas!\n\n`;
-        transacoesExtraidas.forEach((t, index) => {
-          resposta += `${index + 1}. ${t.descricao} - R$ ${t.valor.toFixed(2)} (${t.categoria}) - ${t.tipo === 'entrada' ? 'Entrada' : 'Saída'}\n`;
-        });
-        resposta += `\n📊 Total acumulado: R$ ${total.toFixed(2)}`;
+      if (transacoesSalvas.length === 1) {
+        resposta = formatarMensagemTransacao(transacoesSalvas[0]);
+      } else if (transacoesSalvas.length > 1) {
+        resposta = formatarMensagemMultiplasTransacoes(transacoesSalvas);
       }
       
       twiml.message(resposta);
