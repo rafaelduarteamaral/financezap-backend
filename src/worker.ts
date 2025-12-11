@@ -19,6 +19,7 @@ import {
   buscarAgendamentosD1,
   buscarAgendamentoPorIdD1,
   atualizarStatusAgendamentoD1,
+  atualizarAgendamentoD1,
   removerAgendamentoD1,
   criarAgendamentoD1,
   salvarNotificacaoD1,
@@ -2634,6 +2635,10 @@ app.get('/api/agendamentos', async (c) => {
         status: ag.status,
         categoria: ag.categoria,
         notificado: ag.notificado === 1,
+        recorrente: ag.recorrente === 1,
+        totalParcelas: ag.totalParcelas,
+        parcelaAtual: ag.parcelaAtual,
+        agendamentoPaiId: ag.agendamentoPaiId,
         criadoEm: ag.criadoEm,
         atualizadoEm: ag.atualizadoEm,
       }))
@@ -2663,7 +2668,7 @@ app.post('/api/agendamentos', async (c) => {
     }
     
     const body = await c.req.json();
-    const { descricao, valor, dataAgendamento, tipo, categoria } = body;
+    const { descricao, valor, dataAgendamento, tipo, categoria, recorrente, totalParcelas } = body;
     
     // Validações
     if (!descricao || !descricao.trim()) {
@@ -2688,6 +2693,11 @@ app.post('/api/agendamentos', async (c) => {
       return c.json({ success: false, error: 'Formato de data inválido. Use YYYY-MM-DD' }, 400);
     }
     
+    // Validações para agendamentos recorrentes
+    if (recorrente && (!totalParcelas || totalParcelas < 2 || totalParcelas > 999)) {
+      return c.json({ success: false, error: 'Para agendamentos recorrentes, totalParcelas deve ser entre 2 e 999' }, 400);
+    }
+    
     const agendamento = {
       telefone: telefoneFormatado,
       descricao: descricao.trim(),
@@ -2697,16 +2707,30 @@ app.post('/api/agendamentos', async (c) => {
       categoria: categoria || 'outros',
     };
     
-    const id = await criarAgendamentoD1(c.env.financezap_db, agendamento);
+    let ids: number[];
+    if (recorrente && totalParcelas) {
+      const { criarAgendamentosRecorrentesD1 } = await import('./d1');
+      ids = await criarAgendamentosRecorrentesD1(c.env.financezap_db, {
+        ...agendamento,
+        totalParcelas: Number(totalParcelas),
+      });
+    } else {
+      const id = await criarAgendamentoD1(c.env.financezap_db, agendamento);
+      ids = [id];
+    }
     
     return c.json({
       success: true,
-      message: 'Agendamento criado com sucesso',
-      agendamento: {
+      message: recorrente 
+        ? `${ids.length} agendamentos recorrentes criados com sucesso`
+        : 'Agendamento criado com sucesso',
+      agendamentos: ids.map(id => ({
         id,
         ...agendamento,
-        status: 'pendente'
-      }
+        status: 'pendente',
+        recorrente: recorrente || false,
+        totalParcelas: recorrente ? totalParcelas : null,
+      }))
     });
   } catch (error: any) {
     console.error('Erro em POST /api/agendamentos:', error);
@@ -2733,10 +2757,54 @@ app.put('/api/agendamentos/:id', async (c) => {
     
     const id = Number(c.req.param('id'));
     const body = await c.req.json();
-    const { status } = body;
+    const { status, descricao, valor, dataAgendamento, tipo, categoria } = body;
     
-    if (!['pendente', 'pago', 'cancelado'].includes(status)) {
-      return c.json({ success: false, error: 'Status inválido' }, 400);
+    // Se apenas status foi enviado, usa a função antiga
+    if (status && !descricao && !valor && !dataAgendamento && !tipo && !categoria) {
+      if (!['pendente', 'pago', 'cancelado'].includes(status)) {
+        return c.json({ success: false, error: 'Status inválido' }, 400);
+      }
+      const atualizado = await atualizarStatusAgendamentoD1(c.env.financezap_db, id, status);
+      if (!atualizado) {
+        return c.json({ success: false, error: 'Agendamento não encontrado' }, 404);
+      }
+      return c.json({ success: true, message: 'Status atualizado com sucesso' });
+    } else {
+      // Atualização completa
+      const dadosAtualizacao: any = {};
+      if (descricao !== undefined) dadosAtualizacao.descricao = descricao.trim();
+      if (valor !== undefined) {
+        if (isNaN(Number(valor)) || Number(valor) <= 0) {
+          return c.json({ success: false, error: 'Valor inválido' }, 400);
+        }
+        dadosAtualizacao.valor = Number(valor);
+      }
+      if (dataAgendamento !== undefined) {
+        const dataRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dataRegex.test(dataAgendamento)) {
+          return c.json({ success: false, error: 'Formato de data inválido. Use YYYY-MM-DD' }, 400);
+        }
+        dadosAtualizacao.dataAgendamento = dataAgendamento;
+      }
+      if (tipo !== undefined) {
+        if (!['pagamento', 'recebimento'].includes(tipo)) {
+          return c.json({ success: false, error: 'Tipo deve ser "pagamento" ou "recebimento"' }, 400);
+        }
+        dadosAtualizacao.tipo = tipo;
+      }
+      if (categoria !== undefined) dadosAtualizacao.categoria = categoria;
+      if (status !== undefined) {
+        if (!['pendente', 'pago', 'cancelado'].includes(status)) {
+          return c.json({ success: false, error: 'Status inválido. Use: pendente, pago ou cancelado' }, 400);
+        }
+        dadosAtualizacao.status = status;
+      }
+      
+      const atualizado = await atualizarAgendamentoD1(c.env.financezap_db, id, dadosAtualizacao);
+      if (!atualizado) {
+        return c.json({ success: false, error: 'Agendamento não encontrado' }, 404);
+      }
+      return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
     }
     
     const agendamento = await buscarAgendamentoPorIdD1(c.env.financezap_db, id);

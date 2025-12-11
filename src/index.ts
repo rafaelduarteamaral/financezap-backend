@@ -34,9 +34,11 @@ import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from
 import { enviarMensagemZApi, enviarMensagemComBotoesZApi, zapiEstaConfigurada, verificarStatusInstancia } from './zapi';
 import {
   criarAgendamento,
+  criarAgendamentosRecorrentes,
   buscarAgendamentosPorTelefone,
   buscarAgendamentoPorId,
   atualizarStatusAgendamento,
+  atualizarAgendamento,
   removerAgendamento,
   buscarAgendamentosDoDia,
   marcarComoNotificado,
@@ -3761,7 +3763,7 @@ app.post('/api/agendamentos', autenticarMiddleware, validarPermissaoDados, async
       });
     }
     
-    const { descricao, valor, dataAgendamento, tipo, categoria } = req.body;
+    const { descricao, valor, dataAgendamento, tipo, categoria, recorrente, totalParcelas } = req.body;
     
     // Validações
     if (!descricao || !descricao.trim()) {
@@ -3801,6 +3803,14 @@ app.post('/api/agendamentos', autenticarMiddleware, validarPermissaoDados, async
       });
     }
     
+    // Validações para agendamentos recorrentes
+    if (recorrente && (!totalParcelas || totalParcelas < 2 || totalParcelas > 999)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Para agendamentos recorrentes, totalParcelas deve ser entre 2 e 999'
+      });
+    }
+    
     // Formata o telefone
     const telefoneFormatado = telefone.startsWith('whatsapp:') 
       ? telefone 
@@ -3817,16 +3827,30 @@ app.post('/api/agendamentos', autenticarMiddleware, validarPermissaoDados, async
       categoria: categoria || 'outros',
     };
     
-    const id = await criarAgendamento(agendamento);
+    let ids: number[];
+    if (recorrente && totalParcelas) {
+      const { criarAgendamentosRecorrentes } = await import('./agendamentos');
+      ids = await criarAgendamentosRecorrentes({
+        ...agendamento,
+        totalParcelas: Number(totalParcelas),
+      });
+    } else {
+      const id = await criarAgendamento(agendamento);
+      ids = [id];
+    }
     
     res.json({
       success: true,
-      message: 'Agendamento criado com sucesso',
-      agendamento: {
+      message: recorrente 
+        ? `${ids.length} agendamentos recorrentes criados com sucesso`
+        : 'Agendamento criado com sucesso',
+      agendamentos: ids.map(id => ({
         id,
         ...agendamento,
-        status: 'pendente'
-      }
+        status: 'pendente',
+        recorrente: recorrente || false,
+        totalParcelas: recorrente ? totalParcelas : null,
+      }))
     });
   } catch (error: any) {
     console.error('❌ Erro ao criar agendamento:', error);
@@ -3837,11 +3861,11 @@ app.post('/api/agendamentos', autenticarMiddleware, validarPermissaoDados, async
   }
 });
 
-// API: Atualizar status do agendamento - PROTEGIDA
+// API: Atualizar agendamento - PROTEGIDA
 app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, async (req: any, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, descricao, valor, dataAgendamento, tipo, categoria } = req.body;
     const telefone = req.telefone;
 
     if (!telefone) {
@@ -3879,14 +3903,60 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
     
     console.log(`   ✅ Telefones correspondem!`);
 
-    if (!['pendente', 'pago', 'cancelado'].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Status inválido. Use: pendente, pago ou cancelado'
-      });
+    // Se apenas status foi enviado, usa a função antiga
+    if (status && !descricao && !valor && !dataAgendamento && !tipo && !categoria) {
+      if (!['pendente', 'pago', 'cancelado'].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Status inválido. Use: pendente, pago ou cancelado'
+        });
+      }
+      await atualizarStatusAgendamento(parseInt(id), status);
+    } else {
+      // Atualização completa
+      const dadosAtualizacao: any = {};
+      if (descricao !== undefined) dadosAtualizacao.descricao = descricao.trim();
+      if (valor !== undefined) {
+        if (isNaN(Number(valor)) || Number(valor) <= 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Valor inválido'
+          });
+        }
+        dadosAtualizacao.valor = Number(valor);
+      }
+      if (dataAgendamento !== undefined) {
+        const dataRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dataRegex.test(dataAgendamento)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Formato de data inválido. Use YYYY-MM-DD'
+          });
+        }
+        dadosAtualizacao.dataAgendamento = dataAgendamento;
+      }
+      if (tipo !== undefined) {
+        if (!['pagamento', 'recebimento'].includes(tipo)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Tipo deve ser "pagamento" ou "recebimento"'
+          });
+        }
+        dadosAtualizacao.tipo = tipo;
+      }
+      if (categoria !== undefined) dadosAtualizacao.categoria = categoria;
+      if (status !== undefined) {
+        if (!['pendente', 'pago', 'cancelado'].includes(status)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Status inválido. Use: pendente, pago ou cancelado'
+          });
+        }
+        dadosAtualizacao.status = status;
+      }
+      
+      await atualizarAgendamento(parseInt(id), dadosAtualizacao);
     }
-
-    await atualizarStatusAgendamento(parseInt(id), status);
 
     // Se marcou como pago, cria transação automaticamente
     if (status === 'pago') {

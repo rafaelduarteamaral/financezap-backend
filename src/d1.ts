@@ -51,6 +51,12 @@ export interface TransacaoRecord {
   dataHora: string;
   data: string;
   mensagemOriginal?: string | null;
+  carteiraId?: number | null;
+  carteira?: {
+    id: number;
+    nome: string;
+    tipo?: string;
+  } | null;
 }
 
 export interface TransacoesResultado {
@@ -210,6 +216,70 @@ function montarWhere(filtros: {
   return { whereClause, params };
 }
 
+// Função auxiliar para buscar ou criar carteira por tipo
+async function buscarOuCriarCarteiraPorTipoD1(
+  db: D1Database,
+  telefone: string,
+  tipo: 'debito' | 'credito'
+): Promise<CarteiraRecord> {
+  const variacoes = telefoneVariacoes(telefone);
+  const preferida = variacoes[0];
+  
+  // Nomes padrão para carteiras
+  const nomeCarteira = tipo === 'credito' ? 'Cartão de Crédito' : 'Cartão de Débito';
+  
+  // Tenta buscar uma carteira existente com nome similar
+  for (const variacao of variacoes) {
+    const carteiras = await db
+      .prepare(`
+        SELECT * FROM carteiras 
+        WHERE telefone = ? AND ativo = 1 
+        AND (nome LIKE ? OR nome LIKE ?)
+        ORDER BY padrao DESC, criadoEm ASC
+        LIMIT 1
+      `)
+      .bind(
+        variacao,
+        `%${tipo}%`,
+        `%${tipo === 'credito' ? 'Crédito' : 'Débito'}%`
+      )
+      .all<CarteiraRecord>();
+    
+    if (carteiras.results && carteiras.results.length > 0) {
+      console.log(`✅ D1: Carteira encontrada para ${tipo}:`, carteiras.results[0].nome);
+      return carteiras.results[0];
+    }
+  }
+  
+  // Se não encontrou, busca qualquer carteira ativa do usuário
+  for (const variacao of variacoes) {
+    const carteira = await db
+      .prepare('SELECT * FROM carteiras WHERE telefone = ? AND ativo = 1 ORDER BY padrao DESC, criadoEm ASC LIMIT 1')
+      .bind(variacao)
+      .first<CarteiraRecord>();
+    
+    if (carteira) {
+      console.log(`✅ D1: Usando carteira existente:`, carteira.nome);
+      return carteira;
+    }
+  }
+  
+  // Se não encontrou nenhuma, cria uma nova
+  console.log(`📦 D1: Criando nova carteira ${tipo} para ${preferida}`);
+  const carteiraId = await criarCarteiraD1(db, telefone, {
+    nome: nomeCarteira,
+    descricao: `Carteira ${tipo === 'credito' ? 'de crédito' : 'de débito'}`,
+    padrao: false
+  });
+  
+  const novaCarteira = await buscarCarteiraPorIdD1(db, carteiraId, telefone);
+  if (!novaCarteira) {
+    throw new Error('Erro ao criar carteira');
+  }
+  
+  return novaCarteira;
+}
+
 export async function salvarTransacao(
   db: D1Database,
   transacao: Omit<TransacaoRecord, 'id'>
@@ -221,11 +291,25 @@ export async function salvarTransacao(
   const telefoneNormalizado = normalizarTelefone(transacao.telefone);
   console.log('💾 D1: Salvando transação com telefone normalizado:', telefoneNormalizado);
 
+  // Busca ou cria carteira se não foi fornecida
+  let carteiraId = transacao.carteiraId;
+  if (!carteiraId) {
+    const tipoCarteira = (transacao.metodo || 'debito') as 'debito' | 'credito';
+    try {
+      const carteira = await buscarOuCriarCarteiraPorTipoD1(db, telefoneNormalizado, tipoCarteira);
+      carteiraId = carteira.id || null;
+      console.log(`📦 D1: Carteira associada: ${carteira.nome} (ID: ${carteiraId})`);
+    } catch (error: any) {
+      console.error('⚠️ D1: Erro ao buscar/criar carteira, salvando sem carteiraId:', error.message);
+      carteiraId = null;
+    }
+  }
+
   const result = await db
     .prepare(
       `INSERT INTO transacoes 
-        (telefone, descricao, valor, categoria, tipo, metodo, dataHora, data, mensagemOriginal) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (telefone, descricao, valor, categoria, tipo, metodo, dataHora, data, mensagemOriginal, carteiraId) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       telefoneNormalizado,
@@ -236,12 +320,13 @@ export async function salvarTransacao(
       transacao.metodo || 'debito',
       dataHora,
       data,
-      transacao.mensagemOriginal ?? null
+      transacao.mensagemOriginal ?? null,
+      carteiraId
     )
     .run();
 
   const id = Number(result.meta.last_row_id);
-  console.log('✅ D1: Transação salva com ID:', id, 'telefone:', telefoneNormalizado);
+  console.log('✅ D1: Transação salva com ID:', id, 'telefone:', telefoneNormalizado, 'carteiraId:', carteiraId);
   return id;
 }
 
@@ -269,44 +354,120 @@ export async function buscarTransacoes(
   const limit = filtros.limit && filtros.limit > 0 ? Math.min(filtros.limit, 100) : 20;
   const offset = filtros.offset && filtros.offset > 0 ? filtros.offset : 0;
 
-  console.log('🔍 Executando COUNT com WHERE:', whereClause);
+  // Ajusta a cláusula WHERE para usar o alias 't.' da tabela transacoes
+  const whereClauseComAlias = whereClause
+    .replace(/\btelefone\s*=/g, 't.telefone =')
+    .replace(/date\(data\)/g, 'date(t.data)')
+    .replace(/\bvalor\s*>=/g, 't.valor >=')
+    .replace(/\bvalor\s*<=/g, 't.valor <=')
+    .replace(/\bdescricao\s+LIKE/g, 't.descricao LIKE')
+    .replace(/\bcategoria\s*=/g, 't.categoria =');
+
+  console.log('🔍 Executando COUNT com WHERE:', whereClauseComAlias);
   console.log('🔍 Parâmetros do COUNT:', params);
   
   const totalRow = await db
-    .prepare(`SELECT COUNT(*) as total FROM transacoes ${whereClause}`)
+    .prepare(`SELECT COUNT(*) as total FROM transacoes t ${whereClauseComAlias}`)
     .bind(...params)
     .first<{ total: number }>();
   
   console.log('🔍 Resultado do COUNT:', totalRow?.total ?? 0);
 
-  console.log('🔍 Executando SELECT com WHERE:', whereClause);
+  console.log('🔍 Executando SELECT com WHERE:', whereClauseComAlias);
   console.log('🔍 Parâmetros do SELECT:', [...params, limit, offset]);
   
+  // Query com LEFT JOIN para incluir dados da carteira
   const rows = await db
     .prepare(
-      `SELECT id, telefone, descricao, valor, categoria, tipo, metodo, dataHora, data, mensagemOriginal 
-       FROM transacoes ${whereClause}
-       ORDER BY datetime(dataHora) DESC 
+      `SELECT 
+        t.id, 
+        t.telefone, 
+        t.descricao, 
+        t.valor, 
+        t.categoria, 
+        t.tipo, 
+        t.metodo, 
+        t.dataHora, 
+        t.data, 
+        t.mensagemOriginal,
+        t.carteiraId,
+        c.id as carteira_id,
+        c.nome as carteira_nome
+       FROM transacoes t
+       LEFT JOIN carteiras c ON t.carteiraId = c.id AND c.ativo = 1
+       ${whereClauseComAlias}
+       ORDER BY datetime(t.dataHora) DESC 
        LIMIT ? OFFSET ?`
     )
     .bind(...params, limit, offset)
-    .all<TransacaoRecord>();
+    .all<any>();
   
   console.log('🔍 Resultado do SELECT:', {
     quantidade: rows.results?.length ?? 0,
     telefonesEncontrados: rows.results?.map((t: any) => t.telefone).slice(0, 5) ?? []
   });
 
+  // Processa transações e atualiza as que não têm carteiraId (em background)
+  const transacoesSemCarteira = (rows.results || []).filter((t: any) => !t.carteiraId && !t.carteira_id);
+  if (transacoesSemCarteira.length > 0) {
+    console.log(`🔄 D1: ${transacoesSemCarteira.length} transações sem carteira detectadas. Associando carteiras...`);
+    // Atualiza em background para não bloquear a resposta
+    (async () => {
+      for (const t of transacoesSemCarteira.slice(0, 10)) { // Limita a 10 por vez
+        try {
+          const tipoCarteira = (t.metodo || 'debito') as 'debito' | 'credito';
+          const carteira = await buscarOuCriarCarteiraPorTipoD1(db, t.telefone, tipoCarteira);
+          await db
+            .prepare('UPDATE transacoes SET carteiraId = ? WHERE id = ?')
+            .bind(carteira.id, t.id)
+            .run();
+          console.log(`✅ D1: Transação ${t.id} associada à carteira ${carteira.nome}`);
+        } catch (error: any) {
+          console.error(`❌ D1: Erro ao associar carteira para transação ${t.id}:`, error.message);
+        }
+      }
+    })();
+  }
+
   return {
     total: totalRow?.total ?? 0,
-    transacoes: (rows.results || []).map((t: any) => ({
-      ...t,
-      mensagemOriginal: t.mensagemOriginal ?? null,
-      dataHora: t.dataHora ?? new Date().toISOString(),
-      data: t.data ?? (t.dataHora ? t.dataHora.slice(0, 10) : new Date().toISOString().slice(0, 10)),
-      tipo: t.tipo === 'entrada' ? 'entrada' : 'saida',
-      metodo: t.metodo === 'credito' ? 'credito' : 'debito',
-    })),
+    transacoes: (rows.results || []).map((t: any) => {
+      // Se não tem carteira no JOIN mas tem carteiraId, busca a carteira
+      let carteiraData = t.carteira_id ? {
+        id: t.carteira_id,
+        nome: t.carteira_nome,
+        tipo: t.metodo === 'credito' ? 'credito' : 'debito',
+      } : null;
+      
+      // Se tem carteiraId mas não tem dados da carteira, tenta buscar (em background)
+      if (t.carteiraId && !carteiraData) {
+        (async () => {
+          try {
+            const carteira = await buscarCarteiraPorIdD1(db, t.carteiraId, t.telefone);
+            if (carteira) {
+              console.log(`✅ D1: Carteira ${carteira.id} encontrada para transação ${t.id}`);
+            }
+          } catch (error) {
+            // Ignora erros em background
+          }
+        })();
+      }
+      
+      return {
+        id: t.id,
+        telefone: t.telefone,
+        descricao: t.descricao,
+        valor: t.valor,
+        categoria: t.categoria,
+        tipo: t.tipo === 'entrada' ? 'entrada' : 'saida',
+        metodo: t.metodo === 'credito' ? 'credito' : 'debito',
+        dataHora: t.dataHora ?? new Date().toISOString(),
+        data: t.data ?? (t.dataHora ? t.dataHora.slice(0, 10) : new Date().toISOString().slice(0, 10)),
+        mensagemOriginal: t.mensagemOriginal ?? null,
+        carteiraId: t.carteiraId ?? null,
+        carteira: carteiraData,
+      };
+    }),
   };
 }
 
@@ -913,6 +1074,11 @@ export interface AgendamentoRecord {
   status: string;
   categoria: string | null;
   notificado: number; // 0 ou 1
+  // Campos para agendamentos recorrentes
+  recorrente: number; // 0 ou 1
+  totalParcelas: number | null;
+  parcelaAtual: number | null;
+  agendamentoPaiId: number | null;
   criadoEm: string;
   atualizadoEm: string;
 }
@@ -978,6 +1144,10 @@ export async function criarAgendamentoD1(
     dataAgendamento: string;
     tipo: string;
     categoria?: string;
+    recorrente?: boolean;
+    totalParcelas?: number;
+    parcelaAtual?: number;
+    agendamentoPaiId?: number;
   }
 ): Promise<number> {
   const variacoes = telefoneVariacoes(dados.telefone);
@@ -986,8 +1156,8 @@ export async function criarAgendamentoD1(
   const result = await db
     .prepare(`
       INSERT INTO agendamentos 
-      (telefone, descricao, valor, dataAgendamento, tipo, status, categoria, notificado, criadoEm, atualizadoEm)
-      VALUES (?, ?, ?, ?, ?, 'pendente', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      (telefone, descricao, valor, dataAgendamento, tipo, status, categoria, notificado, recorrente, totalParcelas, parcelaAtual, agendamentoPaiId, criadoEm, atualizadoEm)
+      VALUES (?, ?, ?, ?, ?, 'pendente', ?, 0, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `)
     .bind(
       preferida,
@@ -995,11 +1165,58 @@ export async function criarAgendamentoD1(
       dados.valor,
       dados.dataAgendamento,
       dados.tipo,
-      dados.categoria || 'outros'
+      dados.categoria || 'outros',
+      dados.recorrente ? 1 : 0,
+      dados.totalParcelas || null,
+      dados.parcelaAtual || null,
+      dados.agendamentoPaiId || null
     )
     .run();
   
   return Number(result.meta.last_row_id);
+}
+
+// Criar agendamentos recorrentes (cria todos de uma vez)
+export async function criarAgendamentosRecorrentesD1(
+  db: D1Database,
+  dados: {
+    telefone: string;
+    descricao: string;
+    valor: number;
+    dataAgendamento: string;
+    tipo: string;
+    categoria?: string;
+    totalParcelas: number;
+  }
+): Promise<number[]> {
+  const ids: number[] = [];
+  const dataInicial = new Date(dados.dataAgendamento);
+  
+  // Cria o primeiro agendamento (pai)
+  const primeiroId = await criarAgendamentoD1(db, {
+    ...dados,
+    parcelaAtual: 1,
+    agendamentoPaiId: undefined,
+    recorrente: true,
+  });
+  ids.push(primeiroId);
+  
+  // Cria os demais agendamentos (filhos)
+  for (let i = 2; i <= dados.totalParcelas; i++) {
+    const dataParcela = new Date(dataInicial);
+    dataParcela.setMonth(dataParcela.getMonth() + (i - 1));
+    
+    const id = await criarAgendamentoD1(db, {
+      ...dados,
+      dataAgendamento: dataParcela.toISOString().split('T')[0],
+      parcelaAtual: i,
+      agendamentoPaiId: primeiroId,
+      recorrente: true,
+    });
+    ids.push(id);
+  }
+  
+  return ids;
 }
 
 export async function atualizarStatusAgendamentoD1(
@@ -1011,6 +1228,59 @@ export async function atualizarStatusAgendamentoD1(
     .prepare('UPDATE agendamentos SET status = ?, atualizadoEm = CURRENT_TIMESTAMP WHERE id = ?')
     .bind(status, id)
     .run();
+  
+  return (result.meta.changes || 0) > 0;
+}
+
+export async function atualizarAgendamentoD1(
+  db: D1Database,
+  id: number,
+  dados: {
+    descricao?: string;
+    valor?: number;
+    dataAgendamento?: string;
+    tipo?: string;
+    categoria?: string;
+    status?: string;
+  }
+): Promise<boolean> {
+  const campos: string[] = [];
+  const valores: any[] = [];
+  
+  if (dados.descricao !== undefined) {
+    campos.push('descricao = ?');
+    valores.push(dados.descricao);
+  }
+  if (dados.valor !== undefined) {
+    campos.push('valor = ?');
+    valores.push(dados.valor);
+  }
+  if (dados.dataAgendamento !== undefined) {
+    campos.push('dataAgendamento = ?');
+    valores.push(dados.dataAgendamento);
+  }
+  if (dados.tipo !== undefined) {
+    campos.push('tipo = ?');
+    valores.push(dados.tipo);
+  }
+  if (dados.categoria !== undefined) {
+    campos.push('categoria = ?');
+    valores.push(dados.categoria);
+  }
+  if (dados.status !== undefined) {
+    campos.push('status = ?');
+    valores.push(dados.status);
+  }
+  
+  if (campos.length === 0) {
+    return false;
+  }
+  
+  campos.push('atualizadoEm = CURRENT_TIMESTAMP');
+  valores.push(id);
+  
+  const query = `UPDATE agendamentos SET ${campos.join(', ')} WHERE id = ?`;
+  const result = await db.prepare(query).bind(...valores).run();
   
   return (result.meta.changes || 0) > 0;
 }

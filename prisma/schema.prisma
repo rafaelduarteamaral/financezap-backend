@@ -73,12 +73,19 @@ model Agendamento {
   status          String    @default("pendente") // "pendente", "pago", "cancelado"
   categoria       String?   // Categoria do agendamento
   notificado      Boolean   @default(false) // Se já foi enviada notificação
+  // Campos para agendamentos recorrentes
+  recorrente      Boolean   @default(false) // Se é um agendamento recorrente
+  totalParcelas   Int?      // Total de parcelas (ex: 36, 10)
+  parcelaAtual    Int?      // Parcela atual (1, 2, 3...)
+  agendamentoPaiId Int?     // ID do agendamento original (para rastrear a série)
   criadoEm        DateTime  @default(now())
   atualizadoEm    DateTime  @updatedAt
 
   @@index([telefone])
   @@index([dataAgendamento])
   @@index([status])
+  @@index([agendamentoPaiId])
+  @@index([recorrente])
   @@map("agendamentos")
 }
 
@@ -122,6 +129,9 @@ model Carteira {
   telefone        String    // Telefone do usuário
   nome            String    // Nome da carteira (ex: "Carteira Principal", "Poupança")
   descricao       String?   // Descrição opcional
+  tipo            String    @default("debito") // "debito" ou "credito"
+  limiteCredito   Float?    // Limite da conta de crédito (apenas para tipo "credito")
+  diaPagamento    Int?      // Dia do mês para pagamento da fatura (apenas para tipo "credito", 1-31)
   padrao          Int       @default(0) // 0 = false, 1 = true (carteira padrão)
   ativo           Int       @default(1) // 0 = false, 1 = true (carteira ativa)
   criadoEm        DateTime  @default(now())
@@ -133,5 +143,6 @@ model Carteira {
   @@index([telefone])
   @@index([padrao])
   @@index([ativo])
+  @@index([tipo])
   @@map("carteiras")
 }

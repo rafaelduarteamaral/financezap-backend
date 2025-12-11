@@ -23,6 +23,11 @@ export interface NovoAgendamento {
   dataAgendamento: string; // YYYY-MM-DD
   tipo: 'pagamento' | 'recebimento';
   categoria?: string;
+  // Campos para agendamentos recorrentes
+  recorrente?: boolean;
+  totalParcelas?: number;
+  parcelaAtual?: number;
+  agendamentoPaiId?: number;
 }
 
 // Criar novo agendamento
@@ -38,6 +43,10 @@ export async function criarAgendamento(dados: NovoAgendamento): Promise<number> 
         categoria: dados.categoria || 'outros',
         status: 'pendente',
         notificado: false,
+        recorrente: dados.recorrente || false,
+        totalParcelas: dados.totalParcelas || null,
+        parcelaAtual: dados.parcelaAtual || null,
+        agendamentoPaiId: dados.agendamentoPaiId || null,
       },
     });
 
@@ -46,6 +55,40 @@ export async function criarAgendamento(dados: NovoAgendamento): Promise<number> 
     console.error('❌ Erro ao criar agendamento:', error);
     throw error;
   }
+}
+
+// Criar agendamentos recorrentes (cria todos de uma vez)
+export async function criarAgendamentosRecorrentes(
+  dados: NovoAgendamento & { totalParcelas: number }
+): Promise<number[]> {
+  const ids: number[] = [];
+  const dataInicial = new Date(dados.dataAgendamento);
+  
+  // Cria o primeiro agendamento (pai)
+  const primeiroId = await criarAgendamento({
+    ...dados,
+    parcelaAtual: 1,
+    agendamentoPaiId: null,
+    recorrente: true,
+  });
+  ids.push(primeiroId);
+  
+  // Cria os demais agendamentos (filhos)
+  for (let i = 2; i <= dados.totalParcelas; i++) {
+    const dataParcela = new Date(dataInicial);
+    dataParcela.setMonth(dataParcela.getMonth() + (i - 1));
+    
+    const id = await criarAgendamento({
+      ...dados,
+      dataAgendamento: dataParcela.toISOString().split('T')[0],
+      parcelaAtual: i,
+      agendamentoPaiId: primeiroId,
+      recorrente: true,
+    });
+    ids.push(id);
+  }
+  
+  return ids;
 }
 
 // Buscar agendamentos por telefone
@@ -198,6 +241,40 @@ export async function atualizarStatusAgendamento(
     return true;
   } catch (error) {
     console.error('❌ Erro ao atualizar status do agendamento:', error);
+    throw error;
+  }
+}
+
+// Atualizar agendamento completo
+export async function atualizarAgendamento(
+  id: number,
+  dados: {
+    descricao?: string;
+    valor?: number;
+    dataAgendamento?: string;
+    tipo?: 'pagamento' | 'recebimento';
+    categoria?: string;
+    status?: 'pendente' | 'pago' | 'cancelado';
+  }
+): Promise<boolean> {
+  try {
+    const dataAtualizacao: any = {};
+    
+    if (dados.descricao !== undefined) dataAtualizacao.descricao = dados.descricao;
+    if (dados.valor !== undefined) dataAtualizacao.valor = dados.valor;
+    if (dados.dataAgendamento !== undefined) dataAtualizacao.dataAgendamento = dados.dataAgendamento;
+    if (dados.tipo !== undefined) dataAtualizacao.tipo = dados.tipo;
+    if (dados.categoria !== undefined) dataAtualizacao.categoria = dados.categoria;
+    if (dados.status !== undefined) dataAtualizacao.status = dados.status;
+
+    await (prisma as any).agendamento.update({
+      where: { id },
+      data: dataAtualizacao,
+    });
+
+    return true;
+  } catch (error) {
+    console.error('❌ Erro ao atualizar agendamento:', error);
     throw error;
   }
 }

@@ -32,6 +32,7 @@ jest.mock('../src/carteiras', () => ({
   buscarCarteiraPorId: jest.fn(),
   buscarCarteirasPorTelefone: jest.fn(),
   criarCarteira: jest.fn(),
+  buscarOuCriarCarteiraPorTipo: jest.fn(),
 }));
 
 // Mock de autenticação
@@ -62,13 +63,28 @@ describe('API de Transações', () => {
     }
 
     // Mock de carteiras
-    const { buscarCarteiraPadrao } = require('../src/carteiras');
-    buscarCarteiraPadrao.mockResolvedValue({
+    const { buscarCarteiraPadrao, buscarOuCriarCarteiraPorTipo } = require('../src/carteiras');
+    const carteiraPadrao = {
       id: 1,
       telefone: 'whatsapp:+5511999999999',
       nome: 'Carteira Principal',
+      tipo: 'debito',
+      limiteCredito: null,
+      diaPagamento: null,
       padrao: 1,
       ativo: 1,
+      criadoEm: new Date(),
+      atualizadoEm: new Date(),
+    };
+    buscarCarteiraPadrao.mockResolvedValue(carteiraPadrao);
+    // Mock da nova função que é usada no código
+    buscarOuCriarCarteiraPorTipo.mockImplementation(async (telefone: string, tipo: 'debito' | 'credito') => {
+      return {
+        ...carteiraPadrao,
+        tipo,
+        limiteCredito: tipo === 'credito' ? 1000 : null,
+        diaPagamento: tipo === 'credito' ? 10 : null,
+      };
     });
 
     const loginResponse = await request(app)
@@ -172,24 +188,25 @@ describe('API de Transações', () => {
 
     it('deve criar transação com sucesso', async () => {
       const { prisma } = require('../src/database');
-      const { buscarCarteiraPadrao } = require('../src/carteiras');
+      const { buscarOuCriarCarteiraPorTipo } = require('../src/carteiras');
+      const { salvarTransacao } = require('../src/database');
       
-      // Mock de carteira padrão
-      buscarCarteiraPadrao.mockResolvedValue({
+      // Mock da função que busca ou cria carteira por tipo
+      buscarOuCriarCarteiraPorTipo.mockResolvedValue({
         id: 1,
         telefone: 'whatsapp:+5511999999999',
         nome: 'Carteira Principal',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 1,
         ativo: 1,
+        criadoEm: new Date(),
+        atualizadoEm: new Date(),
       });
       
-      prisma.transacao.create = jest.fn().mockResolvedValue({
-        id: 2,
-        telefone: 'whatsapp:+5511999999999',
-        ...novaTransacao,
-        dataHora: '2024-01-01 10:00:00',
-        carteiraId: 1,
-      });
+      // Mock de salvarTransacao que é usado internamente
+      salvarTransacao.mockResolvedValue(2);
 
       const response = await request(app)
         .post('/api/transacoes')

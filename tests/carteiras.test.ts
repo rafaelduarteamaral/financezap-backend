@@ -40,24 +40,29 @@ describe('API de Carteiras', () => {
   const telefoneTeste = 'whatsapp:+5511999999999';
   let authToken: string;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     jest.clearAllMocks();
     
-    // Mock de login para obter token
-    const { prisma } = require('../src/database');
-    prisma.usuario.findUnique = jest.fn().mockResolvedValue({
-      telefone: telefoneTeste,
-      nome: 'Teste',
-      status: 'ativo',
+    // Mock explícito da função buscarOuCriarCarteiraPorTipo para evitar travamentos
+    (carteirasModule.buscarOuCriarCarteiraPorTipo as jest.Mock) = jest.fn().mockImplementation(async (telefone: string, tipo: 'debito' | 'credito') => {
+      // Retorna uma carteira mockada do tipo solicitado
+      return {
+        id: 1,
+        telefone,
+        nome: 'Carteira Principal',
+        descricao: 'Carteira padrão',
+        tipo,
+        limiteCredito: tipo === 'credito' ? 1000 : null,
+        diaPagamento: tipo === 'credito' ? 10 : null,
+        padrao: 1,
+        ativo: 1,
+        criadoEm: new Date(),
+        atualizadoEm: new Date(),
+      };
     });
-
-    const loginResponse = await request(app)
-      .post('/api/auth/login')
-      .send({ telefone: '+5511999999999' });
-
-    if (loginResponse.status === 200 && loginResponse.body.token) {
-      authToken = loginResponse.body.token;
-    }
+    
+    // Usa token mockado ao invés de fazer login real (evita travamentos)
+    authToken = 'mock-jwt-token';
   });
 
   describe('GET /api/carteiras', () => {
@@ -68,6 +73,9 @@ describe('API de Carteiras', () => {
           telefone: telefoneTeste,
           nome: 'Carteira Principal',
           descricao: 'Carteira principal para uso diário',
+          tipo: 'debito',
+          limiteCredito: null,
+          diaPagamento: null,
           padrao: 1,
           ativo: 1,
           criadoEm: new Date(),
@@ -78,6 +86,9 @@ describe('API de Carteiras', () => {
           telefone: telefoneTeste,
           nome: 'Poupança',
           descricao: 'Carteira para economias',
+          tipo: 'debito',
+          limiteCredito: null,
+          diaPagamento: null,
           padrao: 0,
           ativo: 1,
           criadoEm: new Date(),
@@ -116,6 +127,9 @@ describe('API de Carteiras', () => {
         telefone: telefoneTeste,
         nome: 'Carteira Principal',
         descricao: 'Carteira principal para uso diário',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 1,
         ativo: 1,
         criadoEm: new Date(),
@@ -157,6 +171,9 @@ describe('API de Carteiras', () => {
         id: 3,
         telefone: telefoneTeste,
         ...novaCarteira,
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 0,
         ativo: 1,
         criadoEm: new Date(),
@@ -180,6 +197,9 @@ describe('API de Carteiras', () => {
         telefone: telefoneTeste,
         nome: 'Nova Carteira Padrão',
         descricao: 'Descrição',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 1,
         ativo: 1,
         criadoEm: new Date(),
@@ -218,6 +238,9 @@ describe('API de Carteiras', () => {
         id: 1,
         telefone: telefoneTeste,
         nome: 'Carteira Principal',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 0,
         ativo: 1,
       });
@@ -226,6 +249,9 @@ describe('API de Carteiras', () => {
         telefone: telefoneTeste,
         nome: 'Carteira Atualizada',
         descricao: 'Nova descrição',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 0,
         ativo: 1,
       });
@@ -281,6 +307,9 @@ describe('API de Carteiras', () => {
         id: 2,
         telefone: telefoneTeste,
         nome: 'Poupança',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 0,
         ativo: 1,
       });
@@ -288,6 +317,9 @@ describe('API de Carteiras', () => {
         id: 2,
         telefone: telefoneTeste,
         nome: 'Poupança',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 1,
         ativo: 1,
       });
@@ -320,6 +352,9 @@ describe('API de Carteiras', () => {
         id: 2,
         telefone: telefoneTeste,
         nome: 'Poupança',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 0,
         ativo: 1,
       });
@@ -338,6 +373,9 @@ describe('API de Carteiras', () => {
         id: 1,
         telefone: telefoneTeste,
         nome: 'Carteira Principal',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
         padrao: 1, // É padrão
         ativo: 1,
       });
@@ -369,4 +407,120 @@ describe('API de Carteiras', () => {
       expect(carteirasModule.removerCarteira).toHaveBeenCalled();
     });
   });
+
+  describe('POST /api/carteiras - Carteira de Crédito', () => {
+    it('deve criar carteira de crédito com limite e dia de pagamento', async () => {
+      (carteirasModule.criarCarteira as jest.Mock).mockResolvedValue({
+        id: 4,
+        telefone: telefoneTeste,
+        nome: 'Cartão de Crédito',
+        descricao: 'Carteira de crédito',
+        tipo: 'credito',
+        limiteCredito: 5000,
+        diaPagamento: 15,
+        padrao: 0,
+        ativo: 1,
+        criadoEm: new Date(),
+        atualizadoEm: new Date(),
+      });
+
+      const response = await request(app)
+        .post('/api/carteiras')
+        .set('Authorization', `Bearer ${authToken || 'test-token'}`)
+        .send({
+          nome: 'Cartão de Crédito',
+          descricao: 'Carteira de crédito',
+          tipo: 'credito',
+          limiteCredito: 5000,
+          diaPagamento: 15,
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.carteira.tipo).toBe('credito');
+      expect(response.body.carteira.limiteCredito).toBe(5000);
+      expect(response.body.carteira.diaPagamento).toBe(15);
+    });
+
+    it('deve retornar erro se criar carteira crédito sem limite', async () => {
+      (carteirasModule.criarCarteira as jest.Mock).mockRejectedValue(
+        new Error('Limite de crédito deve ser maior que zero')
+      );
+
+      const response = await request(app)
+        .post('/api/carteiras')
+        .set('Authorization', `Bearer ${authToken || 'test-token'}`)
+        .send({
+          nome: 'Cartão de Crédito',
+          tipo: 'credito',
+          limiteCredito: 0,
+          diaPagamento: 15,
+        });
+
+      expect(response.status).toBe(500);
+      expect(response.body.success).toBe(false);
+    });
+
+    it('deve retornar erro se criar carteira crédito com dia de pagamento inválido', async () => {
+      (carteirasModule.criarCarteira as jest.Mock).mockRejectedValue(
+        new Error('Dia de pagamento deve ser entre 1 e 31')
+      );
+
+      const response = await request(app)
+        .post('/api/carteiras')
+        .set('Authorization', `Bearer ${authToken || 'test-token'}`)
+        .send({
+          nome: 'Cartão de Crédito',
+          tipo: 'credito',
+          limiteCredito: 5000,
+          diaPagamento: 32,
+        });
+
+      expect(response.status).toBe(500);
+      expect(response.body.success).toBe(false);
+    });
+  });
+
+  describe('PUT /api/carteiras/:id - Atualizar tipo de carteira', () => {
+    it('deve atualizar carteira de débito para crédito', async () => {
+      (carteirasModule.buscarCarteiraPorId as jest.Mock).mockResolvedValue({
+        id: 1,
+        telefone: telefoneTeste,
+        nome: 'Carteira Principal',
+        tipo: 'debito',
+        limiteCredito: null,
+        diaPagamento: null,
+        padrao: 0,
+        ativo: 1,
+      });
+      (carteirasModule.atualizarCarteira as jest.Mock).mockResolvedValue({
+        id: 1,
+        telefone: telefoneTeste,
+        nome: 'Carteira Principal',
+        tipo: 'credito',
+        limiteCredito: 3000,
+        diaPagamento: 20,
+        padrao: 0,
+        ativo: 1,
+      });
+
+      const response = await request(app)
+        .put('/api/carteiras/1')
+        .set('Authorization', `Bearer ${authToken || 'test-token'}`)
+        .send({
+          tipo: 'credito',
+          limiteCredito: 3000,
+          diaPagamento: 20,
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.carteira.tipo).toBe('credito');
+      expect(response.body.carteira.limiteCredito).toBe(3000);
+      expect(response.body.carteira.diaPagamento).toBe(20);
+    });
+  });
+
+  // Nota: Testes de buscarOuCriarCarteiraPorTipo são validados através dos testes de integração
+  // A função é testada indiretamente quando transações são criadas via API
 });

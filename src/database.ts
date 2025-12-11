@@ -31,24 +31,15 @@ export async function salvarTransacao(transacao: Transacao): Promise<number> {
     
     if (!carteiraIdFinal) {
       // Importa funções de carteiras dinamicamente para evitar dependência circular
-      const { buscarCarteiraPadrao, criarCarteira } = await import('./carteiras');
+      const { buscarOuCriarCarteiraPorTipo } = await import('./carteiras');
       
-      // Busca carteira padrão
-      let carteiraPadrao = await buscarCarteiraPadrao(transacao.telefone);
+      // Determina o tipo de carteira baseado no método da transação
+      const tipoCarteiraNecessario = (transacao.metodo || 'debito') as 'debito' | 'credito';
       
-      // Se não houver carteira padrão, cria uma automaticamente
-      if (!carteiraPadrao) {
-        console.log('📦 Nenhuma carteira encontrada. Criando carteira padrão automaticamente...');
-        carteiraPadrao = await criarCarteira(
-          transacao.telefone,
-          'Carteira Principal',
-          'Carteira padrão criada automaticamente',
-          true // Define como padrão
-        );
-        console.log(`✅ Carteira padrão criada automaticamente: ID ${carteiraPadrao.id}`);
-      }
-      
-      carteiraIdFinal = carteiraPadrao.id;
+      // Busca ou cria carteira apropriada para o tipo
+      const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(transacao.telefone, tipoCarteiraNecessario);
+      carteiraIdFinal = carteiraApropriada.id;
+      console.log(`📦 Carteira utilizada: "${carteiraApropriada.nome}" (ID: ${carteiraApropriada.id}, tipo: ${carteiraApropriada.tipo})`);
     }
     
     const result = await prisma.transacao.create({
@@ -83,6 +74,15 @@ export async function buscarTransacoesPorTelefone(telefone: string): Promise<Tra
       where: { telefone: telefoneLimpo },
       orderBy: { dataHora: 'desc' },
       take: 100,
+      include: {
+        carteira: {
+          select: {
+            id: true,
+            nome: true,
+            tipo: true,
+          },
+        },
+      },
     });
     
     // Se não encontrou, tenta sem o +
@@ -99,6 +99,15 @@ export async function buscarTransacoesPorTelefone(telefone: string): Promise<Tra
         },
         orderBy: { dataHora: 'desc' },
         take: 100,
+        include: {
+          carteira: {
+            select: {
+              id: true,
+              nome: true,
+              tipo: true,
+            },
+          },
+        },
       });
     }
     
@@ -125,6 +134,15 @@ export async function buscarTransacoesPorTelefone(telefone: string): Promise<Tra
                 where: { telefone: t.telefone },
                 orderBy: { dataHora: 'desc' },
                 take: 100,
+                include: {
+                  carteira: {
+                    select: {
+                      id: true,
+                      nome: true,
+                      tipo: true,
+                    },
+                  },
+                },
               });
               break;
             }
@@ -139,12 +157,17 @@ export async function buscarTransacoesPorTelefone(telefone: string): Promise<Tra
       telefone: t.telefone,
       descricao: t.descricao,
       valor: t.valor,
-      categoria: t.categoria,
+      categoria: t.categoria || 'outros',
       tipo: (t.tipo === 'entrada' ? 'entrada' : 'saida') as 'entrada' | 'saida', // Inclui tipo (entrada ou saida)
       metodo: (t.metodo === 'credito' ? 'credito' : 'debito') as 'credito' | 'debito', // Inclui metodo (credito ou debito)
       dataHora: t.dataHora,
       data: t.data,
       mensagemOriginal: t.mensagemOriginal || undefined,
+      carteira: t.carteira ? {
+        id: t.carteira.id,
+        nome: t.carteira.nome,
+        tipo: t.carteira.tipo,
+      } : undefined,
     }));
   } catch (error) {
     console.error('❌ Erro ao buscar transações:', error);
@@ -168,7 +191,7 @@ export async function buscarTransacaoPorId(id: number): Promise<Transacao | null
       telefone: transacao.telefone,
       descricao: transacao.descricao,
       valor: transacao.valor,
-      categoria: transacao.categoria,
+      categoria: transacao.categoria || 'outros',
       tipo: (transacao.tipo === 'entrada' ? 'entrada' : 'saida') as 'entrada' | 'saida',
       metodo: (transacao.metodo === 'credito' ? 'credito' : 'debito') as 'credito' | 'debito',
       dataHora: transacao.dataHora,
@@ -314,6 +337,15 @@ export async function buscarTodasTransacoes(limit: number = 100): Promise<Transa
     const transacoes = await prisma.transacao.findMany({
       orderBy: { dataHora: 'desc' },
       take: limit,
+      include: {
+        carteira: {
+          select: {
+            id: true,
+            nome: true,
+            tipo: true,
+          },
+        },
+      },
     });
     
     return transacoes.map(t => ({
@@ -321,12 +353,17 @@ export async function buscarTodasTransacoes(limit: number = 100): Promise<Transa
       telefone: t.telefone,
       descricao: t.descricao,
       valor: t.valor,
-      categoria: t.categoria,
+      categoria: t.categoria || 'outros',
       tipo: (t.tipo === 'entrada' ? 'entrada' : 'saida') as 'entrada' | 'saida', // Inclui tipo (entrada ou saida)
       metodo: (t.metodo === 'credito' ? 'credito' : 'debito') as 'credito' | 'debito', // Inclui metodo (credito ou debito)
       dataHora: t.dataHora,
       data: t.data,
       mensagemOriginal: t.mensagemOriginal || undefined,
+      carteira: t.carteira ? {
+        id: t.carteira.id,
+        nome: t.carteira.nome,
+        tipo: t.carteira.tipo,
+      } : undefined,
     }));
   } catch (error) {
     console.error('❌ Erro ao buscar todas as transações:', error);
@@ -389,6 +426,7 @@ export async function buscarTransacoesComFiltros(filtros: {
   valorMax?: number;
   descricao?: string;
   categoria?: string;
+  carteirasIds?: number[];
   limit?: number;
   offset?: number;
 }): Promise<{ transacoes: Transacao[]; total: number }> {
@@ -516,6 +554,12 @@ export async function buscarTransacoesComFiltros(filtros: {
       andConditions.push({ categoria: filtros.categoria });
     }
     
+    // Adiciona filtro de carteiras (múltiplas carteiras)
+    if (filtros.carteirasIds && filtros.carteirasIds.length > 0) {
+      andConditions.push({ carteiraId: { in: filtros.carteirasIds } });
+      console.log(`   💳 Filtro de carteiras: ${filtros.carteirasIds.join(', ')}`);
+    }
+    
     // Monta o where final
     let finalWhere = andConditions.length > 0 ? { AND: andConditions } : {};
     
@@ -627,12 +671,30 @@ export async function buscarTransacoesComFiltros(filtros: {
       orderBy: { dataHora: 'desc' },
       take: filtros.limit || 100,
       skip: filtros.offset || 0,
+      include: {
+        carteira: {
+          select: {
+            id: true,
+            nome: true,
+            tipo: true,
+          },
+        },
+      },
     });
     
     console.log(`✅ Transações retornadas do banco: ${transacoes.length}`);
     
     if (transacoes.length > 0) {
       console.log(`   📋 Telefones das transações encontradas:`, transacoes.map(t => t.telefone).slice(0, 5));
+      // Debug: verificar carteiras
+      const transacoesComCarteira = transacoes.filter(t => t.carteira).length;
+      const transacoesSemCarteira = transacoes.filter(t => !t.carteira).length;
+      console.log(`   💳 Transações com carteira: ${transacoesComCarteira}, sem carteira: ${transacoesSemCarteira}`);
+      if (transacoes[0].carteira) {
+        console.log(`   💳 Exemplo de carteira:`, transacoes[0].carteira);
+      } else {
+        console.log(`   💳 Primeira transação sem carteira - carteiraId:`, transacoes[0].carteiraId);
+      }
     }
     
     // Remove duplicatas por ID (caso existam)
@@ -644,32 +706,143 @@ export async function buscarTransacoesComFiltros(filtros: {
       console.log(`⚠️ Duplicatas detectadas no backend: ${transacoes.length - transacoesUnicas.length} removidas`);
     }
     
+    // Tenta associar carteiras para transações que não têm (em background, não bloqueia a resposta)
+    const transacoesSemCarteira = transacoesUnicas.filter(t => !t.carteiraId && !t.carteira);
+    if (transacoesSemCarteira.length > 0) {
+      console.log(`   🔄 ${transacoesSemCarteira.length} transações sem carteira detectadas. Tentando associar...`);
+      // Executa em background para não bloquear a resposta
+      (async () => {
+        try {
+          const { buscarOuCriarCarteiraPorTipo } = await import('./carteiras');
+          for (const transacao of transacoesSemCarteira.slice(0, 10)) { // Limita a 10 por vez para não sobrecarregar
+            try {
+              const tipoCarteira = (transacao.metodo || 'debito') as 'debito' | 'credito';
+              const carteira = await buscarOuCriarCarteiraPorTipo(transacao.telefone, tipoCarteira);
+              await prisma.transacao.update({
+                where: { id: transacao.id },
+                data: { carteiraId: carteira.id },
+              });
+              console.log(`   ✅ Transação ${transacao.id} associada à carteira ${carteira.nome}`);
+            } catch (err) {
+              console.error(`   ❌ Erro ao associar carteira para transação ${transacao.id}:`, err);
+            }
+          }
+        } catch (err) {
+          console.error('   ❌ Erro ao importar buscarOuCriarCarteiraPorTipo:', err);
+        }
+      })();
+    }
+    
     if (transacoesUnicas.length > 0) {
       console.log(`   Primeira transação:`, {
         id: transacoesUnicas[0].id,
         telefone: transacoesUnicas[0].telefone,
         descricao: transacoesUnicas[0].descricao,
         valor: transacoesUnicas[0].valor,
-        dataHora: transacoesUnicas[0].dataHora
+        dataHora: transacoesUnicas[0].dataHora,
+        carteiraId: transacoesUnicas[0].carteiraId,
+        carteira: transacoesUnicas[0].carteira ? {
+          id: transacoesUnicas[0].carteira.id,
+          nome: transacoesUnicas[0].carteira.nome,
+          tipo: transacoesUnicas[0].carteira.tipo
+        } : null
       });
     }
     
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log(`✅ buscarTransacoesComFiltros - FIM: ${transacoesUnicas.length} transações únicas de ${total} total\n`);
 
-    return {
-      transacoes: transacoesUnicas.map(t => ({
+    // Busca carteiras para transações sem carteira (em batch por telefone e tipo)
+    const carteirasCache: { [key: string]: { id: number; nome: string; tipo: string } } = {};
+    const transacoesSemCarteiraParaBuscar = transacoesUnicas.filter(t => !t.carteira);
+    
+    if (transacoesSemCarteiraParaBuscar.length > 0) {
+      console.log(`   🔄 Buscando carteiras para ${transacoesSemCarteiraParaBuscar.length} transações sem carteira...`);
+      try {
+        const { buscarOuCriarCarteiraPorTipo } = await import('./carteiras');
+        const telefonesUnicos = [...new Set(transacoesSemCarteiraParaBuscar.map(t => t.telefone))];
+        
+        // Busca carteiras para cada combinação telefone+tipo (limita para não travar)
+        for (const telefone of telefonesUnicos.slice(0, 5)) { // Limita a 5 telefones por vez
+          const transacoesDoTelefone = transacoesSemCarteiraParaBuscar.filter(t => t.telefone === telefone);
+          const tipos = [...new Set(transacoesDoTelefone.map(t => t.metodo || 'debito'))];
+          
+          for (const tipo of tipos) {
+            const tipoCarteira = tipo as 'debito' | 'credito';
+            const cacheKey = `${telefone}-${tipoCarteira}`;
+            
+            if (!carteirasCache[cacheKey]) {
+              try {
+                console.log(`   🔍 Buscando carteira ${tipoCarteira} para telefone ${telefone}...`);
+                const carteira = await buscarOuCriarCarteiraPorTipo(telefone, tipoCarteira);
+                carteirasCache[cacheKey] = {
+                  id: carteira.id,
+                  nome: carteira.nome,
+                  tipo: carteira.tipo || tipoCarteira,
+                };
+                console.log(`   ✅ Carteira encontrada: ${carteira.nome} (ID: ${carteira.id})`);
+              } catch (err) {
+                console.error(`   ⚠️ Erro ao buscar carteira ${tipoCarteira} para ${telefone}:`, err);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('   ⚠️ Erro ao importar buscarOuCriarCarteiraPorTipo:', err);
+      }
+    }
+    
+    // Mapeia todas as transações
+    const transacoesMapeadas = transacoesUnicas.map((t) => {
+      let carteiraData = t.carteira ? {
+        id: t.carteira.id,
+        nome: t.carteira.nome,
+        tipo: t.carteira.tipo,
+      } : undefined;
+      
+      // Se não tem carteira, tenta usar do cache
+      if (!carteiraData && t.metodo) {
+        const tipoCarteira = (t.metodo || 'debito') as 'debito' | 'credito';
+        const cacheKey = `${t.telefone}-${tipoCarteira}`;
+        carteiraData = carteirasCache[cacheKey];
+        
+        if (carteiraData) {
+          console.log(`   ✅ Usando carteira do cache para transação ${t.id}: ${carteiraData.nome}`);
+        }
+        
+        // Atualiza a transação no banco em background (não bloqueia)
+        if (carteiraData && !t.carteiraId) {
+          prisma.transacao.update({
+            where: { id: t.id },
+            data: { carteiraId: carteiraData.id },
+          }).catch(err => {
+            console.error(`   ⚠️ Erro ao atualizar carteiraId da transação ${t.id}:`, err);
+          });
+        }
+      }
+      
+      return {
         id: t.id,
         telefone: t.telefone,
         descricao: t.descricao,
         valor: t.valor,
-        categoria: t.categoria,
-        tipo: (t.tipo === 'entrada' ? 'entrada' : 'saida') as 'entrada' | 'saida', // Inclui tipo (entrada ou saida)
-        metodo: (t.metodo === 'credito' ? 'credito' : 'debito') as 'credito' | 'debito', // Inclui metodo (credito ou debito)
+        categoria: t.categoria || 'outros',
+        tipo: (t.tipo === 'entrada' ? 'entrada' : 'saida') as 'entrada' | 'saida',
+        metodo: (t.metodo === 'credito' ? 'credito' : 'debito') as 'credito' | 'debito',
         dataHora: t.dataHora,
         data: t.data,
         mensagemOriginal: t.mensagemOriginal || undefined,
-      })),
+        carteira: carteiraData,
+      };
+    });
+    
+    // Debug: verifica quantas transações têm carteira após o mapeamento
+    const comCarteira = transacoesMapeadas.filter(t => t.carteira).length;
+    const semCarteira = transacoesMapeadas.filter(t => !t.carteira).length;
+    console.log(`   📊 Após mapeamento: ${comCarteira} com carteira, ${semCarteira} sem carteira`);
+
+    return {
+      transacoes: transacoesMapeadas,
       total,
     };
   } catch (error) {
@@ -687,6 +860,7 @@ export async function obterEstatisticas(filtros?: {
   valorMax?: number;
   descricao?: string;
   categoria?: string;
+  carteirasIds?: number[];
   tipo?: string;
   metodo?: string;
 }): Promise<{
@@ -766,6 +940,11 @@ export async function obterEstatisticas(filtros?: {
       where.categoria = filtros.categoria;
     }
     
+    // Adiciona filtro de carteiras (múltiplas carteiras)
+    if (filtros?.carteirasIds && filtros.carteirasIds.length > 0) {
+      where.carteiraId = { in: filtros.carteirasIds };
+    }
+    
     // Adiciona filtro de tipo (se necessário)
     if (filtros?.tipo) {
       where.tipo = filtros.tipo;
@@ -789,6 +968,7 @@ export async function obterEstatisticas(filtros?: {
       andConditions.push(where.OR);
     }
     if (where.valor) andConditions.push({ valor: where.valor });
+    if (where.carteiraId) andConditions.push({ carteiraId: where.carteiraId });
     if (where.descricao) andConditions.push({ descricao: where.descricao });
     if (where.categoria) andConditions.push({ categoria: where.categoria });
     if (where.tipo) andConditions.push({ tipo: where.tipo });
@@ -803,7 +983,7 @@ export async function obterEstatisticas(filtros?: {
       prisma.transacao.count({ where: finalWhere }),
     ]);
     
-    // Total de SAÍDAS (para "Total Gasto")
+    // Total de SAÍDAS (para "Total Gasto") - APENAS de carteiras de DÉBITO
     const saidasWhereConditions: any[] = [];
     if (finalWhere.AND && Array.isArray(finalWhere.AND)) {
       saidasWhereConditions.push(...finalWhere.AND);
@@ -811,6 +991,14 @@ export async function obterEstatisticas(filtros?: {
       saidasWhereConditions.push(finalWhere);
     }
     saidasWhereConditions.push({ tipo: 'saida' }); // Apenas saídas
+    // Filtra apenas carteiras de débito (ou carteiras sem tipo definido, para compatibilidade)
+    saidasWhereConditions.push({
+      OR: [
+        { carteira: { tipo: 'debito' } },
+        { carteira: null }, // Compatibilidade com transações antigas sem carteira
+        { carteiraId: null }, // Compatibilidade com transações antigas sem carteiraId
+      ]
+    });
     
     const saidasWhere = { AND: saidasWhereConditions };
     
@@ -874,9 +1062,16 @@ export async function obterEstatisticas(filtros?: {
               // Recalcula contagem total com o telefone correto
               totalCount = await prisma.transacao.count({ where: finalWhereMatch });
               
-              // Recalcula saídas com o telefone correto
+              // Recalcula saídas com o telefone correto - apenas débito
               const saidasWhereMatchConditions: any[] = [...andConditionsMatch];
               saidasWhereMatchConditions.push({ tipo: 'saida' });
+              saidasWhereMatchConditions.push({
+                OR: [
+                  { carteira: { tipo: 'debito' } },
+                  { carteira: null },
+                  { carteiraId: null },
+                ]
+              });
               const saidasWhereMatch = { AND: saidasWhereMatchConditions };
               
               [totalSum, minMax] = await Promise.all([
@@ -932,6 +1127,14 @@ export async function obterEstatisticas(filtros?: {
       ]
     });
     hojeWhereConditions.push({ tipo: 'saida' }); // Apenas saídas para "gasto hoje"
+    // Filtra apenas carteiras de débito
+    hojeWhereConditions.push({
+      OR: [
+        { carteira: { tipo: 'debito' } },
+        { carteira: null },
+        { carteiraId: null },
+      ]
+    });
     
     const hojeWhere = { AND: hojeWhereConditions };
     
@@ -970,6 +1173,14 @@ export async function obterEstatisticas(filtros?: {
     // Adiciona filtros específicos para o mês
     mesWhereConditions.push({ data: { gte: mesInicioStr } });
     mesWhereConditions.push({ tipo: 'saida' }); // Apenas saídas para "gasto do mês"
+    // Filtra apenas carteiras de débito
+    mesWhereConditions.push({
+      OR: [
+        { carteira: { tipo: 'debito' } },
+        { carteira: null },
+        { carteiraId: null },
+      ]
+    });
     
     const mesWhere = { AND: mesWhereConditions };
     
@@ -1019,6 +1230,366 @@ export async function obterEstatisticas(filtros?: {
       gastoHoje: 0,
       gastoMes: 0,
     };
+  }
+}
+
+// Estatísticas para CARTEIRAS DE CRÉDITO
+export async function obterEstatisticasCredito(filtros?: {
+  telefone?: string;
+  dataInicio?: string;
+  dataFim?: string;
+  valorMin?: number;
+  valorMax?: number;
+  descricao?: string;
+  categoria?: string;
+  carteirasIds?: number[];
+  tipo?: string;
+  metodo?: string;
+}): Promise<{
+  totalGasto: number;
+  totalTransacoes: number;
+  mediaGasto: number;
+  maiorGasto: number;
+  menorGasto: number;
+  gastoHoje: number;
+  gastoMes: number;
+  limiteUtilizado?: number;
+  limiteDisponivel?: number;
+}> {
+  try {
+    // Reutiliza a lógica de obterEstatisticas, mas filtra apenas carteiras de crédito
+    const where: any = {};
+    const telefoneConditions: any[] = [];
+
+    if (filtros?.telefone) {
+      const telefoneLimpo = filtros.telefone.replace('whatsapp:', '').trim();
+      const semMais = telefoneLimpo.replace(/^\+/, '');
+      const comMais = `+${semMais}`;
+      
+      telefoneConditions.push(
+        { telefone: telefoneLimpo },
+        { telefone: semMais },
+        { telefone: comMais }
+      );
+    }
+
+    if (filtros?.dataInicio || filtros?.dataFim) {
+      const dataFilter: any = {};
+      if (filtros.dataInicio) {
+        const dataInicioStr = filtros.dataInicio.split('T')[0];
+        dataFilter.gte = dataInicioStr;
+      }
+      if (filtros.dataFim) {
+        const dataFimStr = filtros.dataFim.split('T')[0];
+        dataFilter.lte = dataFimStr;
+      }
+      
+      const dataHoraFilter: any = {};
+      if (filtros.dataInicio) {
+        const dataInicioObj = new Date(filtros.dataInicio);
+        dataInicioObj.setHours(0, 0, 0, 0);
+        dataHoraFilter.gte = dataInicioObj.toISOString();
+      }
+      if (filtros.dataFim) {
+        const dataFimObj = new Date(filtros.dataFim);
+        dataFimObj.setHours(23, 59, 59, 999);
+        dataHoraFilter.lte = dataFimObj.toISOString();
+      }
+      
+      where.OR = [
+        { data: dataFilter },
+        { dataHora: dataHoraFilter }
+      ];
+    }
+    
+    if (filtros?.valorMin !== undefined || filtros?.valorMax !== undefined) {
+      where.valor = {};
+      if (filtros.valorMin !== undefined) where.valor.gte = filtros.valorMin;
+      if (filtros.valorMax !== undefined) where.valor.lte = filtros.valorMax;
+    }
+    
+    if (filtros?.descricao) {
+      where.descricao = { contains: filtros.descricao };
+    }
+    
+    if (filtros?.categoria) {
+      where.categoria = filtros.categoria;
+    }
+    
+    // Filtra apenas carteiras de CRÉDITO
+    if (filtros?.carteirasIds && filtros.carteirasIds.length > 0) {
+      where.carteiraId = { in: filtros.carteirasIds };
+    } else {
+      // Se não especificou carteiras, filtra apenas carteiras de crédito
+      where.carteira = { tipo: 'credito' };
+    }
+    
+    if (filtros?.tipo) {
+      where.tipo = filtros.tipo;
+    }
+    
+    if (filtros?.metodo) {
+      where.metodo = filtros.metodo;
+    }
+
+    const andConditions: any[] = [];
+    
+    if (telefoneConditions.length > 0) {
+      andConditions.push({ OR: telefoneConditions });
+    }
+    
+    if (where.OR) {
+      andConditions.push(where.OR);
+    }
+    if (where.valor) andConditions.push({ valor: where.valor });
+    if (where.carteiraId) {
+      andConditions.push({ carteiraId: where.carteiraId });
+      // Garante que as carteiras selecionadas são de crédito
+      andConditions.push({ carteira: { tipo: 'credito' } });
+    } else if (where.carteira) {
+      andConditions.push({ carteira: { tipo: 'credito' } });
+    }
+    if (where.descricao) andConditions.push({ descricao: where.descricao });
+    if (where.categoria) andConditions.push({ categoria: where.categoria });
+    if (where.tipo) andConditions.push({ tipo: where.tipo });
+    if (where.metodo) andConditions.push({ metodo: where.metodo });
+    
+    const finalWhere = andConditions.length > 0 ? { AND: andConditions } : {};
+    
+    // Total geral
+    let totalCount = await prisma.transacao.count({ where: finalWhere });
+    
+    // Total de SAÍDAS de CRÉDITO
+    const saidasWhereConditions: any[] = [];
+    if (finalWhere.AND && Array.isArray(finalWhere.AND)) {
+      saidasWhereConditions.push(...finalWhere.AND);
+    } else if (Object.keys(finalWhere).length > 0) {
+      saidasWhereConditions.push(finalWhere);
+    }
+    saidasWhereConditions.push({ tipo: 'saida' });
+    // Garante que é apenas crédito
+    if (!filtros?.carteirasIds || filtros.carteirasIds.length === 0) {
+      saidasWhereConditions.push({ carteira: { tipo: 'credito' } });
+    }
+    
+    const saidasWhere = { AND: saidasWhereConditions };
+    
+    let [totalSum, minMax] = await Promise.all([
+      prisma.transacao.aggregate({
+        where: saidasWhere,
+        _sum: { valor: true },
+      }),
+      prisma.transacao.aggregate({
+        where: saidasWhere,
+        _min: { valor: true },
+        _max: { valor: true },
+      }),
+    ]);
+
+    // Gasto hoje
+    const agora = new Date();
+    const hoje = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, '0')}-${String(agora.getDate()).padStart(2, '0')}`;
+    
+    const hojeInicio = new Date(agora);
+    hojeInicio.setHours(0, 0, 0, 0);
+    const hojeFim = new Date(agora);
+    hojeFim.setHours(23, 59, 59, 999);
+    
+    const hojeWhereConditions: any[] = [];
+    if (finalWhere.AND && Array.isArray(finalWhere.AND)) {
+      hojeWhereConditions.push(...finalWhere.AND);
+    } else if (Object.keys(finalWhere).length > 0) {
+      hojeWhereConditions.push(finalWhere);
+    }
+    
+    hojeWhereConditions.push({
+      OR: [
+        { data: hoje },
+        {
+          dataHora: {
+            gte: hojeInicio.toISOString(),
+            lte: hojeFim.toISOString()
+          }
+        }
+      ]
+    });
+    hojeWhereConditions.push({ tipo: 'saida' });
+    if (!filtros?.carteirasIds || filtros.carteirasIds.length === 0) {
+      hojeWhereConditions.push({ carteira: { tipo: 'credito' } });
+    }
+    
+    const hojeWhere = { AND: hojeWhereConditions };
+    
+    const hojeSum = await prisma.transacao.aggregate({
+      where: hojeWhere,
+      _sum: { valor: true },
+    });
+
+    // Gasto do mês
+    const mesInicio = new Date();
+    mesInicio.setDate(1);
+    mesInicio.setHours(0, 0, 0, 0);
+    const mesInicioStr = `${mesInicio.getFullYear()}-${String(mesInicio.getMonth() + 1).padStart(2, '0')}-${String(mesInicio.getDate()).padStart(2, '0')}`;
+    
+    const mesWhereConditions: any[] = [];
+    if (finalWhere.AND && Array.isArray(finalWhere.AND)) {
+      mesWhereConditions.push(...finalWhere.AND);
+    } else if (Object.keys(finalWhere).length > 0) {
+      mesWhereConditions.push(finalWhere);
+    }
+    
+    mesWhereConditions.push({ data: { gte: mesInicioStr } });
+    mesWhereConditions.push({ tipo: 'saida' });
+    if (!filtros?.carteirasIds || filtros.carteirasIds.length === 0) {
+      mesWhereConditions.push({ carteira: { tipo: 'credito' } });
+    }
+    
+    const mesWhere = { AND: mesWhereConditions };
+    
+    const mesSum = await prisma.transacao.aggregate({
+      where: mesWhere,
+      _sum: { valor: true },
+    });
+
+    const totalGasto = totalSum._sum.valor || 0;
+    const totalTransacoes = totalCount;
+    const saidasCount = await prisma.transacao.count({ where: saidasWhere });
+    const mediaGasto = saidasCount > 0 ? totalGasto / saidasCount : 0;
+
+    // Calcula limite utilizado e disponível (se houver carteiras de crédito)
+    let limiteUtilizado = 0;
+    let limiteDisponivel = 0;
+    
+    if (filtros?.carteirasIds && filtros.carteirasIds.length > 0) {
+      const carteiras = await prisma.carteira.findMany({
+        where: { id: { in: filtros.carteirasIds }, tipo: 'credito' },
+        select: { limiteCredito: true },
+      });
+      
+      const limiteTotal = carteiras.reduce((sum, c) => sum + (c.limiteCredito || 0), 0);
+      limiteUtilizado = totalGasto;
+      limiteDisponivel = limiteTotal - limiteUtilizado;
+    }
+
+    return {
+      totalGasto,
+      totalTransacoes,
+      mediaGasto,
+      maiorGasto: minMax._max.valor || 0,
+      menorGasto: minMax._min.valor || 0,
+      gastoHoje: hojeSum._sum.valor || 0,
+      gastoMes: mesSum._sum.valor || 0,
+      limiteUtilizado,
+      limiteDisponivel,
+    };
+  } catch (error) {
+    console.error('❌ Erro ao obter estatísticas de crédito:', error);
+    return {
+      totalGasto: 0,
+      totalTransacoes: 0,
+      mediaGasto: 0,
+      maiorGasto: 0,
+      menorGasto: 0,
+      gastoHoje: 0,
+      gastoMes: 0,
+      limiteUtilizado: 0,
+      limiteDisponivel: 0,
+    };
+  }
+}
+
+// Gastos por dia para CARTEIRAS DE CRÉDITO
+export async function gastosPorDiaCredito(telefone?: string, dias: number = 30): Promise<Array<{ data: string; entradas: number; saidas: number; saldo: number }>> {
+  try {
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📊 gastosPorDiaCredito - INÍCIO');
+    console.log(`   Telefone: ${telefone || 'todos'}`);
+    console.log(`   Dias: ${dias}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    const dataLimite = new Date();
+    dataLimite.setDate(dataLimite.getDate() - dias);
+    dataLimite.setHours(0, 0, 0, 0);
+
+    const telefoneConditions: any[] = [];
+    
+    if (telefone) {
+      const telefoneLimpo = telefone.replace('whatsapp:', '').trim();
+      const semMais = telefoneLimpo.replace(/^\+/, '');
+      const comMais = `+${semMais}`;
+      const apenasNumeros = telefoneLimpo.replace(/\D/g, '');
+      
+      telefoneConditions.push(
+        { telefone: telefoneLimpo },
+        { telefone: semMais },
+        { telefone: comMais }
+      );
+      
+      if (apenasNumeros.length >= 11) {
+        const ddd = apenasNumeros.substring(0, 2);
+        const numero = apenasNumeros.substring(2);
+        telefoneConditions.push(
+          { telefone: `+55${ddd}${numero}` },
+          { telefone: `55${ddd}${numero}` },
+          { telefone: `${ddd}${numero}` }
+        );
+      }
+    }
+
+    const dataLimiteStr = dataLimite.toISOString().split('T')[0];
+    
+    const andConditions: any[] = [
+      { data: { gte: dataLimiteStr } },
+      { carteira: { tipo: 'credito' } } // Apenas carteiras de crédito
+    ];
+    
+    if (telefoneConditions.length > 0) {
+      andConditions.push({ OR: telefoneConditions });
+    }
+
+    let where = { AND: andConditions };
+
+    let transacoes = await prisma.transacao.findMany({
+      where,
+      select: {
+        data: true,
+        valor: true,
+        tipo: true,
+        dataHora: true,
+      },
+    });
+
+    // Agrupa por data
+    const gastosPorData: { [key: string]: { entradas: number; saidas: number } } = {};
+    
+    transacoes.forEach(transacao => {
+      const data = transacao.data;
+      if (!gastosPorData[data]) {
+        gastosPorData[data] = { entradas: 0, saidas: 0 };
+      }
+      
+      if (transacao.tipo === 'entrada') {
+        gastosPorData[data].entradas += transacao.valor;
+      } else {
+        gastosPorData[data].saidas += transacao.valor;
+      }
+    });
+
+    // Converte para array e ordena por data
+    const resultado = Object.keys(gastosPorData)
+      .sort()
+      .map(data => ({
+        data,
+        entradas: gastosPorData[data].entradas,
+        saidas: gastosPorData[data].saidas,
+        saldo: gastosPorData[data].entradas - gastosPorData[data].saidas,
+      }));
+
+    console.log(`✅ gastosPorDiaCredito - FIM: ${resultado.length} dias\n`);
+    return resultado;
+  } catch (error) {
+    console.error('❌ Erro ao obter gastos por dia (crédito):', error);
+    return [];
   }
 }
 
@@ -1080,8 +1651,20 @@ export async function gastosPorDia(telefone?: string, dias: number = 30): Promis
 
     console.log('   🔍 WHERE clause inicial:', JSON.stringify(where, null, 2));
 
+    // Filtra apenas carteiras de débito para gastosPorDia
+    const andConditionsComDebito = [...andConditions];
+    andConditionsComDebito.push({
+      OR: [
+        { carteira: { tipo: 'debito' } },
+        { carteira: null },
+        { carteiraId: null },
+      ]
+    });
+    
+    let whereComDebito = { AND: andConditionsComDebito };
+
     let transacoes = await prisma.transacao.findMany({
-      where,
+      where: whereComDebito,
       select: {
         data: true,
         valor: true,
@@ -1141,7 +1724,14 @@ export async function gastosPorDia(telefone?: string, dias: number = 30): Promis
               where = {
                 AND: [
                   { OR: telefoneConditionsMatch },
-                  { data: { gte: dataLimiteStr } }
+                  { data: { gte: dataLimiteStr } },
+                  {
+                    OR: [
+                      { carteira: { tipo: 'debito' } },
+                      { carteira: null },
+                      { carteiraId: null },
+                    ]
+                  }
                 ]
               };
               
