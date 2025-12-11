@@ -1747,9 +1747,11 @@ app.get('/api/auth/verify', async (c) => {
     
     // Verifica o token
     let telefoneFormatado: string;
+    let telefoneOriginal: string;
     try {
-      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
-      telefoneFormatado = formatarTelefone(telefone);
+      telefoneOriginal = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefoneOriginal);
+      console.log('🔍 Token verificado - Telefone original:', telefoneOriginal, 'Formatado:', telefoneFormatado);
     } catch (error: any) {
       console.error('Erro ao verificar token:', error.message);
       if (error.message?.includes('expired')) {
@@ -1758,11 +1760,21 @@ app.get('/api/auth/verify', async (c) => {
       return c.json({ success: false, error: error.message || 'Token inválido' }, 401);
     }
     
+    console.log('🔍 Verificando usuário com telefone formatado:', telefoneFormatado);
     const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, telefoneFormatado);
     
     if (!usuario) {
+      console.error('❌ Usuário não encontrado para telefone:', telefoneFormatado);
+      console.error('   Telefone original do token:', telefoneOriginal);
+      console.error('   Tentando buscar com variações...');
       return c.json({ success: false, error: 'Usuário não encontrado' }, 401);
     }
+    
+    console.log('✅ Usuário encontrado:', {
+      telefone: usuario.telefone,
+      nome: usuario.nome,
+      status: usuario.status
+    });
     
     const stats = await calcularEstatisticas(c.env.financezap_db, { telefone: telefoneFormatado });
     const agora = new Date();
@@ -1771,7 +1783,7 @@ app.get('/api/auth/verify', async (c) => {
       ? Math.ceil((trialExpiraEm.getTime() - agora.getTime()) / (1000 * 60 * 60 * 24))
       : null;
     
-    return c.json({
+    const resposta = {
       success: true,
       telefone: telefoneFormatado,
       usuario: {
@@ -1783,7 +1795,15 @@ app.get('/api/auth/verify', async (c) => {
         diasRestantesTrial: diasRestantes,
         totalTransacoes: stats.totalTransacoes,
       }
+    };
+    
+    console.log('📤 Retornando dados do usuário:', {
+      telefone: resposta.telefone,
+      status: resposta.usuario.status,
+      nome: resposta.usuario.nome
     });
+    
+    return c.json(resposta);
   } catch (error: any) {
     console.error('Erro em GET /api/auth/verify:', error);
     return c.json({ success: false, error: error.message || 'Erro ao verificar token' }, 401);

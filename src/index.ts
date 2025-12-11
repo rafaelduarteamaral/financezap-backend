@@ -3290,14 +3290,53 @@ app.get('/api/auth/verify', async (req, res) => {
       : `whatsapp:+${decoded.telefone}`;
 
     // Busca o usuário no banco de dados
-    const usuario = await prisma.usuario.findUnique({
+    console.log('🔍 Verificando usuário com telefone formatado:', telefoneFormatado);
+    let usuario = await prisma.usuario.findUnique({
       where: { telefone: telefoneFormatado }
     });
 
     if (!usuario) {
-      return res.status(401).json({
-        success: false,
-        error: 'Usuário não encontrado'
+      console.error('❌ Usuário não encontrado para telefone:', telefoneFormatado);
+      console.error('   Telefone original do token:', decoded.telefone);
+      // Tenta buscar com variações do telefone
+      const telefoneSemWhatsapp = telefoneFormatado.replace('whatsapp:', '');
+      const telefoneSemMais = telefoneSemWhatsapp.replace('+', '');
+      const variacoes = [
+        telefoneFormatado,
+        telefoneSemWhatsapp,
+        telefoneSemMais,
+        `whatsapp:${telefoneSemMais}`,
+        `+${telefoneSemMais}`
+      ];
+      
+      for (const variacao of variacoes) {
+        const usuarioVariacao = await prisma.usuario.findUnique({
+          where: { telefone: variacao }
+        });
+        if (usuarioVariacao) {
+          console.log('✅ Usuário encontrado com variação:', variacao);
+          // Atualiza o telefone no banco para o formato correto
+          await prisma.usuario.update({
+            where: { id: usuarioVariacao.id },
+            data: { telefone: telefoneFormatado }
+          });
+          // Usa o usuário encontrado
+          usuario = usuarioVariacao;
+          break;
+        }
+      }
+      
+      if (!usuario) {
+        return res.status(401).json({
+          success: false,
+          error: 'Usuário não encontrado'
+        });
+      }
+    } else {
+      console.log('✅ Usuário encontrado:', {
+        telefone: usuario.telefone,
+        nome: usuario.nome,
+        status: usuario.status
       });
     }
 
