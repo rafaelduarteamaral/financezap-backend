@@ -4072,6 +4072,7 @@ app.post('/webhook/zapi', async (c) => {
         
         await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
       }
+      }
     }
     
     return c.json({ success: true, message: 'Mensagem processada' });
