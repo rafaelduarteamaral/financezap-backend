@@ -11,6 +11,40 @@ import { processarAgendamentoComIA } from './processadorAgendamento';
 import { processarAudioTwilio, processarAudioPublico } from './transcricaoAudio';
 import { verificarRateLimit } from './rateLimiter';
 import { 
+  detectarIntencao,
+  type IntencaoUsuario 
+} from './deteccaoIntencao';
+import {
+  criarConfirmacaoPendente,
+  obterConfirmacaoPendente,
+  removerConfirmacaoPendente,
+  formatarMensagemConfirmacao,
+  isConfirmacao,
+  isCancelamento,
+  isEdicao,
+  type TransacaoParaConfirmar
+} from './confirmacaoTransacoes';
+import {
+  obterContextoConversacao,
+  adicionarMensagemContexto,
+  formatarHistoricoParaPrompt,
+  limparContextoConversacao
+} from './contextoConversacao';
+import {
+  dividirMensagem,
+  criarMenuAjuda,
+  criarMensagemExemplos,
+  criarMensagemComandos,
+  formatarEstatisticasResumo,
+  criarSugestaoProativa,
+  formatarMoeda
+} from './formatadorMensagens';
+import {
+  calcularScoreMedio,
+  devePedirConfirmacao,
+  devePedirMaisInformacoes
+} from './validacaoQualidade';
+import { 
   salvarTransacao, 
   buscarTransacoesPorTelefone, 
   buscarTodasTransacoes, 
@@ -43,6 +77,11 @@ import {
   buscarAgendamentosDoDia,
   marcarComoNotificado,
 } from './agendamentos';
+import {
+  buscarCarteirasPorTelefone,
+  buscarCarteiraPorId,
+  buscarOuCriarCarteiraPorTipo,
+} from './carteiras';
 import {
   inicializarCategoriasPadrao,
   buscarCategorias,
@@ -801,11 +840,205 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
     if (messageText && messageText.trim().length > 0) {
       console.log('🤖 Processando mensagem com IA...');
       
+      // MELHORIA: Adiciona feedback visual (envia mensagem de processamento)
+      try {
+        if (zapiEstaConfigurada()) {
+          // Envia indicador de digitação se possível, ou mensagem rápida
+          await enviarMensagemZApi(fromNumber, '🤖 Processando sua mensagem...');
+        }
+      } catch (e) {
+        // Ignora erro de feedback visual
+      }
+      
       try {
         const mensagemLower = messageText.toLowerCase().trim();
         const telefoneAgendamento = cleanFromNumber.startsWith('whatsapp:') 
           ? cleanFromNumber.replace('whatsapp:', '') 
           : cleanFromNumber;
+        
+        // MELHORIA: Obtém contexto de conversação
+        const contexto = await obterContextoConversacao(cleanFromNumber);
+        
+        // MELHORIA: Adiciona mensagem do usuário ao contexto
+        await adicionarMensagemContexto(cleanFromNumber, 'user', messageText);
+        
+        // MELHORIA: Detecta intenção primeiro
+        const intencao = detectarIntencao(messageText, contexto);
+        console.log(`🎯 Intenção detectada: ${intencao.intencao} (confiança: ${intencao.confianca})`);
+        
+        // MELHORIA: Verifica se há confirmação pendente
+        const confirmacaoPendente = obterConfirmacaoPendente(cleanFromNumber);
+        
+        // Se há confirmação pendente, processa confirmação/cancelamento/edição
+        if (confirmacaoPendente) {
+          if (isConfirmacao(mensagemLower)) {
+            // Confirma e salva transações
+            console.log('✅ Confirmação recebida, salvando transações...');
+            
+            const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
+              ? cleanFromNumber 
+              : cleanFromNumber.startsWith('+')
+              ? `whatsapp:${cleanFromNumber}`
+              : `whatsapp:+${cleanFromNumber}`;
+            
+            const idsSalvos: number[] = [];
+            
+            for (const transacaoParaConfirmar of confirmacaoPendente.transacoes) {
+              try {
+                const tipoCarteiraNecessario = (transacaoParaConfirmar.metodo || 'debito') as 'debito' | 'credito';
+                const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
+                
+                const transacao: Transacao = {
+                  telefone: cleanFromNumber,
+                  descricao: transacaoParaConfirmar.descricao,
+                  valor: transacaoParaConfirmar.valor,
+                  categoria: transacaoParaConfirmar.categoria || 'outros',
+                  tipo: transacaoParaConfirmar.tipo,
+                  metodo: transacaoParaConfirmar.metodo || 'debito',
+                  dataHora: new Date().toLocaleString('pt-BR'),
+                  data: new Date().toISOString().split('T')[0],
+                  mensagemOriginal: messageText,
+                  carteiraId: carteiraApropriada.id
+                };
+                
+                const id = await salvarTransacao(transacao);
+                idsSalvos.push(id);
+              } catch (error: any) {
+                console.error(`❌ Erro ao salvar transação confirmada: ${error.message}`);
+              }
+            }
+            
+            removerConfirmacaoPendente(cleanFromNumber);
+            
+            // MELHORIA: Adiciona resposta ao contexto
+            const respostaConfirmacao = `✅ ${idsSalvos.length} transação(ões) confirmada(s) e salva(s) com sucesso!`;
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaConfirmacao);
+            
+            // MELHORIA: Busca estatísticas para sugestão proativa
+            const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
+            const transacoesRecentes = await buscarTransacoesComFiltros({
+              telefone: cleanFromNumber,
+              limit: 10
+            });
+            
+            const sugestao = criarSugestaoProativa(estatisticas, transacoesRecentes.transacoes);
+            
+            // MELHORIA: Divide mensagem se necessário
+            const mensagens = dividirMensagem(respostaConfirmacao + (sugestao ? `\n\n${sugestao}` : ''));
+            
+            for (const msg of mensagens) {
+              if (zapiEstaConfigurada()) {
+                await enviarMensagemZApi(fromNumber, msg);
+              } else if (twilioWhatsAppNumber) {
+                await client.messages.create({
+                  from: twilioWhatsAppNumber,
+                  to: fromNumber,
+                  body: msg
+                });
+              }
+            }
+            
+            return res.json({ success: true, message: 'Transações confirmadas e salvas' });
+          } else if (isCancelamento(mensagemLower)) {
+            // Cancela confirmação
+            console.log('❌ Confirmação cancelada pelo usuário');
+            removerConfirmacaoPendente(cleanFromNumber);
+            
+            const respostaCancelamento = '❌ Transações canceladas. Nada foi salvo.';
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaCancelamento);
+            
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, respostaCancelamento);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: respostaCancelamento
+              });
+            }
+            
+            return res.json({ success: true, message: 'Confirmação cancelada' });
+          } else if (isEdicao(mensagemLower)) {
+            // Permite edição (por enquanto, cancela e pede para reenviar)
+            removerConfirmacaoPendente(cleanFromNumber);
+            const respostaEdicao = '✏️ Para editar, envie a transação novamente com as informações corretas.';
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaEdicao);
+            
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, respostaEdicao);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: respostaEdicao
+              });
+            }
+            
+            return res.json({ success: true, message: 'Edição solicitada' });
+          }
+        }
+        
+        // MELHORIA: Processa comandos rápidos
+        if (intencao.intencao === 'comando' && intencao.detalhes?.comando) {
+          const comando = intencao.detalhes.comando;
+          let respostaComando = '';
+          
+          if (comando === 'ajuda' || comando === 'help') {
+            respostaComando = criarMenuAjuda();
+          } else if (comando === 'exemplos') {
+            respostaComando = criarMensagemExemplos();
+          } else if (comando === 'comandos') {
+            respostaComando = criarMensagemComandos();
+          } else if (comando === 'hoje') {
+            const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
+            respostaComando = `📊 *Resumo do Dia*\n\n` +
+              `💸 Gasto hoje: ${formatarMoeda(estatisticas.gastoHoje || 0)}\n` +
+              `📝 Transações: ${estatisticas.totalTransacoes || 0}`;
+          } else if (comando === 'mes') {
+            const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
+            respostaComando = formatarEstatisticasResumo(estatisticas);
+          } else {
+            respostaComando = `❓ Comando "${comando}" não reconhecido.\n\nDigite "/ajuda" para ver comandos disponíveis.`;
+          }
+          
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaComando);
+          const mensagens = dividirMensagem(respostaComando);
+          
+          for (const msg of mensagens) {
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, msg);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: msg
+              });
+            }
+          }
+          
+          return res.json({ success: true, message: 'Comando processado' });
+        }
+        
+        // MELHORIA: Processa pedido de ajuda
+        if (intencao.intencao === 'ajuda') {
+          const respostaAjuda = criarMenuAjuda();
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaAjuda);
+          const mensagens = dividirMensagem(respostaAjuda);
+          
+          for (const msg of mensagens) {
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, msg);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: msg
+              });
+            }
+          }
+          
+          return res.json({ success: true, message: 'Ajuda enviada' });
+        }
         
         // Verifica se é solicitação de listagem de agendamentos
         // Verifica se é solicitação de estatísticas/resumo financeiro
@@ -844,52 +1077,37 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
           
           const saldo = totalEntradas - totalSaidas;
           
-          // Formata a resposta
-          const hoje = new Date().toLocaleDateString('pt-BR');
-          let resposta = `📊 *Resumo Financeiro*\n`;
-          resposta += `📅 ${hoje}\n\n`;
+          // MELHORIA: Usa formatador de mensagens
+          const resposta = formatarEstatisticasResumo(estatisticas);
           
-          resposta += `💰 *Saldo Atual:*\n`;
-          resposta += `   ${saldo >= 0 ? '✅' : '⚠️'} R$ ${saldo.toFixed(2)}\n\n`;
+          // MELHORIA: Adiciona sugestão proativa
+          const transacoesRecentes = await buscarTransacoesComFiltros({
+            telefone: telefoneAgendamento,
+            limit: 10
+          });
           
-          resposta += `📈 *Entradas (Total):*\n`;
-          resposta += `   R$ ${totalEntradas.toFixed(2)}\n\n`;
+          const sugestao = criarSugestaoProativa(estatisticas, transacoesRecentes.transacoes);
+          const respostaCompleta = sugestao ? `${resposta}\n\n${sugestao}` : resposta;
           
-          resposta += `📉 *Saídas (Total):*\n`;
-          resposta += `   R$ ${totalSaidas.toFixed(2)}\n\n`;
+          // MELHORIA: Adiciona ao contexto
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaCompleta);
           
-          resposta += `📊 *Hoje:*\n`;
-          resposta += `   💸 Gasto: R$ ${estatisticas.gastoHoje.toFixed(2)}\n\n`;
+          // MELHORIA: Divide mensagem se necessário
+          const mensagens = dividirMensagem(respostaCompleta);
           
-          resposta += `📅 *Este Mês:*\n`;
-          resposta += `   💸 Gasto: R$ ${estatisticas.gastoMes.toFixed(2)}\n\n`;
-          
-          resposta += `📋 *Estatísticas Gerais:*\n`;
-          resposta += `   📝 Total de transações: ${estatisticas.totalTransacoes}\n`;
-          resposta += `   💰 Média por transação: R$ ${estatisticas.mediaGasto.toFixed(2)}\n`;
-          resposta += `   📈 Maior valor: R$ ${estatisticas.maiorGasto.toFixed(2)}\n`;
-          resposta += `   📉 Menor valor: R$ ${estatisticas.menorGasto.toFixed(2)}\n\n`;
-          
-          resposta += `💡 *Dicas:*\n`;
-          if (saldo < 0) {
-            resposta += `   ⚠️ Seu saldo está negativo. Considere reduzir gastos.\n`;
-          } else if (saldo < 100) {
-            resposta += `   💰 Seu saldo está baixo. Cuidado com os gastos!\n`;
-          } else {
-            resposta += `   ✅ Seu saldo está positivo. Continue assim!\n`;
-          }
-          
-          if (zapiEstaConfigurada()) {
-            await enviarMensagemZApi(fromNumber, resposta);
-          } else if (twilioWhatsAppNumber) {
-            try {
-              await client.messages.create({
-                from: twilioWhatsAppNumber,
-                to: fromNumber,
-                body: resposta
-              });
-            } catch (error: any) {
-              console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
+          for (const msg of mensagens) {
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, msg);
+            } else if (twilioWhatsAppNumber) {
+              try {
+                await client.messages.create({
+                  from: twilioWhatsAppNumber,
+                  to: fromNumber,
+                  body: msg
+                });
+              } catch (error: any) {
+                console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
+              }
             }
           }
           
@@ -1195,140 +1413,229 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
         }
         
         // Se não foi agendamento nem confirmação, processa como transação normal
-        const transacoesExtraidas = await processarMensagemComIA(messageText);
-        
-        if (transacoesExtraidas.length > 0) {
-          console.log(`✅ ${transacoesExtraidas.length} transação(ões) encontrada(s)!`);
+        // MELHORIA: Só processa se intenção for transação ou desconhecida (pode ser transação)
+        if (intencao.intencao === 'transacao' || intencao.intencao === 'desconhecida') {
+          const transacoesExtraidas = await processarMensagemComIA(messageText);
           
-          // Busca ou cria carteira padrão antes de salvar transações
-          const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
-            ? cleanFromNumber 
-            : cleanFromNumber.startsWith('+')
-            ? `whatsapp:${cleanFromNumber}`
-            : `whatsapp:+${cleanFromNumber}`;
-          
-          // Salva cada transação no banco de dados
-          for (const transacaoExtraida of transacoesExtraidas) {
-            if (transacaoExtraida.sucesso) {
+          if (transacoesExtraidas.length > 0) {
+            console.log(`✅ ${transacoesExtraidas.length} transação(ões) encontrada(s)!`);
+            
+            // MELHORIA: Valida qualidade da extração
+            const scoreExtracao = calcularScoreMedio(transacoesExtraidas.map(t => ({
+              descricao: t.descricao,
+              valor: t.valor,
+              categoria: t.categoria,
+              tipo: t.tipo,
+              metodo: t.metodo
+            })));
+            
+            console.log(`📊 Score de qualidade: ${scoreExtracao.valor.toFixed(2)} - ${scoreExtracao.motivo}`);
+            
+            // MELHORIA: Se qualidade baixa, pede mais informações
+            if (devePedirMaisInformacoes(scoreExtracao)) {
+              let respostaQualidade = `⚠️ Preciso de mais informações:\n\n`;
+              scoreExtracao.problemas.forEach((p, i) => {
+                respostaQualidade += `${i + 1}. ${p}\n`;
+              });
+              respostaQualidade += `\n💡 ${scoreExtracao.sugestoes.join('\n💡 ')}`;
+              
+              await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaQualidade);
+              const mensagens = dividirMensagem(respostaQualidade);
+              
+              for (const msg of mensagens) {
+                if (zapiEstaConfigurada()) {
+                  await enviarMensagemZApi(fromNumber, msg);
+                } else if (twilioWhatsAppNumber) {
+                  await client.messages.create({
+                    from: twilioWhatsAppNumber,
+                    to: fromNumber,
+                    body: msg
+                  });
+                }
+              }
+              
+              return res.json({ success: true, message: 'Solicitando mais informações' });
+            }
+            
+            // MELHORIA: Prepara transações para confirmação
+            const transacoesParaConfirmar: TransacaoParaConfirmar[] = transacoesExtraidas.map(t => ({
+              descricao: t.descricao,
+              valor: t.valor,
+              categoria: t.categoria,
+              tipo: t.tipo,
+              metodo: t.metodo || 'debito',
+              carteiraNome: t.carteiraNome
+            }));
+            
+            // MELHORIA: Cria confirmação pendente
+            criarConfirmacaoPendente(cleanFromNumber, transacoesParaConfirmar);
+            
+            // MELHORIA: Formata mensagem de confirmação
+            const mensagemConfirmacao = formatarMensagemConfirmacao(transacoesParaConfirmar);
+            
+            // MELHORIA: Adiciona ao contexto
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemConfirmacao);
+            
+            // MELHORIA: Divide mensagem se necessário
+            const mensagens = dividirMensagem(mensagemConfirmacao);
+            
+            // MELHORIA: Envia mensagens divididas
+            for (const msg of mensagens) {
+              if (zapiEstaConfigurada()) {
+                await enviarMensagemZApi(fromNumber, msg);
+              } else if (twilioWhatsAppNumber) {
+                await client.messages.create({
+                  from: twilioWhatsAppNumber,
+                  to: fromNumber,
+                  body: msg
+                });
+              }
+            }
+            
+            return res.json({ 
+              success: true, 
+              message: 'Confirmação pendente - aguardando resposta do usuário' 
+            });
+          } else {
+            // MELHORIA: Se não encontrou transação, verifica se é pergunta
+            if (intencao.intencao === 'pergunta') {
+              console.log('❓ Pergunta detectada, usando chat de IA...');
+              
+              // Busca estatísticas e transações para contexto
+              const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
+              const transacoesRecentes = await buscarTransacoesComFiltros({
+                telefone: cleanFromNumber,
+                limit: 10
+              });
+              
+              // MELHORIA: Inclui histórico no prompt
+              const historicoTexto = formatarHistoricoParaPrompt(contexto);
+              
               try {
-                const dataAtual = new Date().toISOString().split('T')[0];
+                const respostaIA = await processarChatFinanceiro(
+                  messageText,
+                  estatisticas,
+                  transacoesRecentes.transacoes,
+                  historicoTexto
+                );
                 
-                // Garante que o tipo seja 'entrada' ou 'saida'
-                const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
-                  ? 'entrada' 
-                  : 'saida';
+                await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaIA);
                 
-                // Determina o tipo de carteira baseado no método da transação
-                const tipoCarteiraNecessario = (transacaoExtraida.metodo || 'debito') as 'debito' | 'credito';
+                // MELHORIA: Divide resposta longa
+                const mensagens = dividirMensagem(respostaIA);
                 
-                // Se a IA extraiu um nome de carteira, tenta encontrar a carteira correspondente
-                let carteiraIdParaTransacao: number | null = null;
-                if (transacoesExtraidas[0]?.carteiraNome) {
-                  const carteirasUsuario = await buscarCarteirasPorTelefone(telefoneFormatado);
-                  const carteiraEncontrada = carteirasUsuario.find(c => 
-                    c.nome.toLowerCase().includes(transacoesExtraidas[0].carteiraNome!.toLowerCase()) ||
-                    transacoesExtraidas[0].carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
-                  );
-                  if (carteiraEncontrada && carteiraEncontrada.tipo === tipoCarteiraNecessario) {
-                    carteiraIdParaTransacao = carteiraEncontrada.id;
-                    console.log(`   📦 Carteira específica encontrada: "${carteiraEncontrada.nome}" (ID: ${carteiraEncontrada.id}, tipo: ${carteiraEncontrada.tipo})`);
+                for (const msg of mensagens) {
+                  if (zapiEstaConfigurada()) {
+                    await enviarMensagemZApi(fromNumber, msg);
+                  } else if (twilioWhatsAppNumber) {
+                    await client.messages.create({
+                      from: twilioWhatsAppNumber,
+                      to: fromNumber,
+                      body: msg
+                    });
                   }
                 }
                 
-                // Se não encontrou carteira específica, busca ou cria uma apropriada para o tipo
-                if (!carteiraIdParaTransacao) {
-                  const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
-                  carteiraIdParaTransacao = carteiraApropriada.id;
-                  console.log(`   📦 Carteira utilizada: "${carteiraApropriada.nome}" (ID: ${carteiraApropriada.id}, tipo: ${carteiraApropriada.tipo})`);
+                return res.json({ success: true, message: 'Pergunta respondida' });
+              } catch (error: any) {
+                console.error('❌ Erro no chat de IA:', error);
+                const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+                
+                await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
+                
+                if (zapiEstaConfigurada()) {
+                  await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+                } else if (twilioWhatsAppNumber) {
+                  await client.messages.create({
+                    from: twilioWhatsAppNumber,
+                    to: fromNumber,
+                    body: mensagemAmigavel
+                  });
                 }
                 
-                const transacao: Transacao = {
-                  telefone: cleanFromNumber,
-                  descricao: transacaoExtraida.descricao,
-                  valor: transacaoExtraida.valor,
-                  categoria: transacaoExtraida.categoria || 'outros',
-                  tipo: tipoFinal,
-                  metodo: transacaoExtraida.metodo || 'debito',
-                  dataHora: new Date().toLocaleString('pt-BR'),
-                  data: dataAtual,
-                  mensagemOriginal: messageText,
-                  carteiraId: carteiraIdParaTransacao
-                };
-                
-                // Log do tipo antes de salvar
-                console.log(`   🔍 Tipo extraído pela IA: "${transacaoExtraida.tipo}" -> Tipo final: "${tipoFinal}" (será salvo como: "${transacao.tipo}")`);
-                console.log(`   💼 Carteira: ID ${carteiraIdParaTransacao}`);
-                
-                const id = await salvarTransacao(transacao);
-                console.log(`   💾 Transação salva (ID: ${id}):`);
-                console.log(`      📝 Descrição: ${transacaoExtraida.descricao}`);
-                console.log(`      💰 Valor: R$ ${transacaoExtraida.valor.toFixed(2)}`);
-                console.log(`      🏷️  Categoria: ${transacaoExtraida.categoria}`);
-                console.log(`      📊 Tipo: ${transacao.tipo} (${transacao.tipo === 'entrada' ? 'Entrada' : 'Saída'})`);
-                console.log(`      💳 Método: ${transacao.metodo}`);
-              } catch (error: any) {
-                console.error(`   ❌ Erro ao salvar transação: ${error.message}`);
+                return res.json({ success: true, message: 'Erro ao processar pergunta' });
+              }
+            } else {
+              console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
+              // MELHORIA: Mensagem mais útil quando não entende
+              const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
+                '💡 *Dicas:*\n' +
+                '• Para registrar gasto: "comprei café por 5 reais"\n' +
+                '• Para registrar receita: "recebi 500 reais"\n' +
+                '• Para ver resumo: "resumo financeiro"\n' +
+                '• Para ajuda: "ajuda" ou "/ajuda"';
+              
+              await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
+              
+              if (zapiEstaConfigurada()) {
+                await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+              } else if (twilioWhatsAppNumber) {
+                try {
+                  await client.messages.create({
+                    from: twilioWhatsAppNumber,
+                    to: fromNumber,
+                    body: mensagemAmigavel
+                  });
+                } catch (error: any) {
+                  console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
+                }
               }
             }
           }
+        } else if (intencao.intencao === 'pergunta') {
+          // MELHORIA: Processa perguntas com contexto
+          console.log('❓ Pergunta detectada, usando chat de IA...');
           
-          // Calcula total do cliente
-          const total = await calcularTotalPorTelefone(cleanFromNumber);
-          console.log(`   📊 Total gasto: R$ ${total.toFixed(2)}`);
+          const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
+          const transacoesRecentes = await buscarTransacoesComFiltros({
+            telefone: cleanFromNumber,
+            limit: 10
+          });
           
-          // Responde ao cliente com confirmação detalhada
-          let resposta = '';
-          if (transacoesExtraidas.length === 1) {
-            const t = transacoesExtraidas[0];
-            resposta = `✅ Transação registrada com sucesso!\n\n`;
-            resposta += `📝 ${t.descricao}\n`;
-            resposta += `💰 Valor: R$ ${t.valor.toFixed(2)}\n`;
-            resposta += `🏷️  Categoria: ${t.categoria}\n`;
-            resposta += `📊 Tipo: ${t.tipo === 'entrada' ? 'Entrada' : 'Saída'}\n`;
-            resposta += `💳 Método: ${t.metodo === 'credito' ? 'Crédito' : 'Débito'}\n`;
-            resposta += `📊 Total acumulado: R$ ${total.toFixed(2)}`;
-          } else {
-            resposta = `✅ ${transacoesExtraidas.length} transações registradas!\n\n`;
-            transacoesExtraidas.forEach((t, index) => {
-              resposta += `${index + 1}. ${t.descricao} - R$ ${t.valor.toFixed(2)} (${t.categoria})\n`;
-            });
-            resposta += `\n📊 Total acumulado: R$ ${total.toFixed(2)}`;
-          }
+          const historicoTexto = formatarHistoricoParaPrompt(contexto);
           
-          // Envia resposta via Z-API (prioridade) ou Twilio (apenas se Z-API não configurada)
-          if (zapiEstaConfigurada()) {
-            const resultadoZApi = await enviarMensagemZApi(fromNumber, resposta);
-            if (!resultadoZApi.success) {
-              console.error('❌ Erro ao enviar resposta via Z-API:', resultadoZApi.error);
+          try {
+            const respostaIA = await processarChatFinanceiro(
+              messageText,
+              estatisticas,
+              transacoesRecentes.transacoes,
+              historicoTexto
+            );
+            
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaIA);
+            
+            const mensagens = dividirMensagem(respostaIA);
+            
+            for (const msg of mensagens) {
+              if (zapiEstaConfigurada()) {
+                await enviarMensagemZApi(fromNumber, msg);
+              } else if (twilioWhatsAppNumber) {
+                await client.messages.create({
+                  from: twilioWhatsAppNumber,
+                  to: fromNumber,
+                  body: msg
+                });
+              }
             }
-          } else if (twilioWhatsAppNumber) {
-            try {
-              await client.messages.create({
-                from: twilioWhatsAppNumber,
-                to: fromNumber,
-                body: resposta
-              });
-            } catch (error: any) {
-              console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
-            }
-          }
-        } else {
-          console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
-          // Envia mensagem amigável quando não entende
-          const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
-          
-          if (zapiEstaConfigurada()) {
-            await enviarMensagemZApi(fromNumber, mensagemAmigavel);
-          } else if (twilioWhatsAppNumber) {
-            try {
+            
+            return res.json({ success: true, message: 'Pergunta respondida' });
+          } catch (error: any) {
+            console.error('❌ Erro no chat de IA:', error);
+            const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
+            
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
+            
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+            } else if (twilioWhatsAppNumber) {
               await client.messages.create({
                 from: twilioWhatsAppNumber,
                 to: fromNumber,
                 body: mensagemAmigavel
               });
-            } catch (error: any) {
-              console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
             }
+            
+            return res.json({ success: true, message: 'Erro ao processar pergunta' });
           }
         }
       } catch (error: any) {

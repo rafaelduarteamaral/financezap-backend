@@ -215,7 +215,8 @@ export interface ChatMessage {
 export async function processarChatFinanceiro(
   mensagem: string,
   estatisticas: any,
-  transacoes: any[]
+  transacoes: any[],
+  historico?: string
 ): Promise<string> {
   const temGroq = process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim() !== '';
   const temGemini = process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '';
@@ -239,9 +240,13 @@ export async function processarChatFinanceiro(
     `- ${t.descricao}: R$ ${t.valor.toFixed(2)} (${t.categoria})`
   ).join('\n');
 
+  // MELHORIA: Adiciona histórico de conversação ao prompt
+  const historicoTexto = historico ? `\n\nHistórico da conversa:\n${historico}` : '';
+  
   const promptCompleto = PROMPT_FINANCEIRO
     .replace('{ESTATISTICAS}', estatisticasTexto)
-    .replace('{TRANSACOES}', transacoesTexto || 'Nenhuma transação recente');
+    .replace('{TRANSACOES}', transacoesTexto || 'Nenhuma transação recente')
+    + historicoTexto;
 
   console.log('🔍 Chat IA - Verificando IAs disponíveis:');
   console.log(`   Groq: ${temGroq ? '✅ Configurado' : '❌ Não configurado'}`);

@@ -217,7 +217,7 @@ function montarWhere(filtros: {
 }
 
 // Função auxiliar para buscar ou criar carteira por tipo
-async function buscarOuCriarCarteiraPorTipoD1(
+export async function buscarOuCriarCarteiraPorTipoD1(
   db: D1Database,
   telefone: string,
   tipo: 'debito' | 'credito'

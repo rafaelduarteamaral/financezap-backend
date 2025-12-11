@@ -54,6 +54,40 @@ import {
 import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from './codigoVerificacao';
 import { gerarDadosRelatorio, calcularPeriodo, formatarRelatorioWhatsApp, formatarRelatorioMensalCompleto } from './relatorios';
 import jwt from '@tsndr/cloudflare-worker-jwt';
+import { 
+  detectarIntencao,
+  type IntencaoUsuario 
+} from './deteccaoIntencao';
+import {
+  criarConfirmacaoPendente,
+  obterConfirmacaoPendente,
+  removerConfirmacaoPendente,
+  formatarMensagemConfirmacao,
+  isConfirmacao,
+  isCancelamento,
+  isEdicao,
+  type TransacaoParaConfirmar
+} from './confirmacaoTransacoes';
+import {
+  obterContextoConversacaoD1,
+  adicionarMensagemContextoD1,
+  formatarHistoricoParaPrompt,
+  limparContextoConversacaoD1
+} from './contextoConversacao';
+import {
+  dividirMensagem,
+  criarMenuAjuda,
+  criarMensagemExemplos,
+  criarMensagemComandos,
+  formatarEstatisticasResumo,
+  criarSugestaoProativa,
+  formatarMoeda
+} from './formatadorMensagens';
+import {
+  calcularScoreMedio,
+  devePedirConfirmacao,
+  devePedirMaisInformacoes
+} from './validacaoQualidade';
 
 // Tipos para Cloudflare Workers
 interface D1Database {
@@ -3648,164 +3682,278 @@ app.post('/webhook/zapi', async (c) => {
       }
     }
     
-    // Se não foi agendamento, processa como transação usando IA
-    console.log('💰 Processando como transação com IA...');
-    
+    // MELHORIA: Adiciona feedback visual
     try {
-      // Processa mensagem com IA para extrair transações
-      const transacoesExtraidas = await processarMensagemComIAWorker(messageText, c.env);
+      await enviarMensagemZApi(telefoneFormatado, '🤖 Processando sua mensagem...', c.env);
+    } catch (e) {
+      // Ignora erro de feedback visual
+    }
+    
+    // MELHORIA: Obtém contexto de conversação
+    const contexto = await obterContextoConversacaoD1(c.env.financezap_db, cleanFromNumber);
+    
+    // MELHORIA: Adiciona mensagem do usuário ao contexto
+    await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'user', messageText);
+    
+    // MELHORIA: Detecta intenção primeiro
+    const intencao = detectarIntencao(messageText, contexto);
+    console.log(`🎯 Intenção detectada: ${intencao.intencao} (confiança: ${intencao.confianca})`);
+    
+    // MELHORIA: Verifica se há confirmação pendente
+    const confirmacaoPendente = obterConfirmacaoPendente(cleanFromNumber);
+    
+    // Se há confirmação pendente, processa confirmação/cancelamento/edição
+    if (confirmacaoPendente) {
+      const mensagemLower = messageText.toLowerCase().trim();
       
-      if (transacoesExtraidas && transacoesExtraidas.length > 0) {
-        console.log(`✅ ${transacoesExtraidas.length} transação(ões) extraída(s) pela IA`);
+      if (isConfirmacao(mensagemLower)) {
+        // Confirma e salva transações
+        console.log('✅ Confirmação recebida, salvando transações...');
         
+        const idsSalvos: number[] = [];
         const dataHora = new Date().toISOString();
         const data = dataHora.slice(0, 10);
         
-        let total = 0;
-        let resposta = '';
-        
-        // Salva cada transação extraída
-        let ultimoTransacaoId = 0;
-        for (const transacaoExtraida of transacoesExtraidas) {
-          // Garante que o tipo seja 'entrada' ou 'saida'
-          const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
-            ? 'entrada' 
-            : 'saida';
-          
-          console.log(`💾 Salvando transação extraída:`, {
-            descricao: transacaoExtraida.descricao,
-            valor: transacaoExtraida.valor,
-            categoria: transacaoExtraida.categoria,
-            tipo: tipoFinal,
-            metodo: transacaoExtraida.metodo || 'debito'
-          });
-          
-          const transacaoId = await salvarTransacao(c.env.financezap_db, {
-            telefone: telefoneFormatado,
-            descricao: transacaoExtraida.descricao || messageText.substring(0, 200),
-            valor: transacaoExtraida.valor,
-            categoria: transacaoExtraida.categoria || 'outros',
-            tipo: tipoFinal,
-            metodo: (transacaoExtraida.metodo && transacaoExtraida.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito',
-            dataHora,
-            data,
-            mensagemOriginal: messageText,
-          });
-          
-          ultimoTransacaoId = transacaoId; // Armazena o último ID para usar na resposta
-          
-          console.log(`✅ Transação salva com ID: ${transacaoId}`);
-          console.log(`📡 SSE: Transação criada, notificando clientes...`);
-          console.log(`📡 SSE: Telefone da transação: ${telefoneFormatado}`);
-          
-          const cleanFromNumber = telefoneFormatado.replace('whatsapp:', '');
-          
-          // Busca o telefone do usuário no banco para garantir correspondência
-          let telefoneParaNotificar = telefoneFormatado;
+        for (const transacaoParaConfirmar of confirmacaoPendente.transacoes) {
           try {
-            const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, cleanFromNumber);
-            if (usuario && usuario.telefone) {
-              // Usa o telefone do banco (que é o formato correto usado no token JWT)
-              telefoneParaNotificar = usuario.telefone.startsWith('whatsapp:') 
-                ? usuario.telefone 
-                : `whatsapp:${usuario.telefone}`;
-              console.log(`📡 SSE: Telefone do usuário no banco: ${telefoneParaNotificar}`);
+            const tipoCarteiraNecessario = (transacaoParaConfirmar.metodo || 'debito') as 'debito' | 'credito';
+            
+            // Busca ou cria carteira apropriada
+            const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+            let carteiraId: number | null = null;
+            
+            // Tenta encontrar carteira do tipo correto (busca por nome)
+            const tipoNome = tipoCarteiraNecessario === 'credito' ? 'Crédito' : 'Débito';
+            const carteiraEncontrada = carteiras.find(c => 
+              c.nome.toLowerCase().includes(tipoCarteiraNecessario) ||
+              c.nome.toLowerCase().includes(tipoNome.toLowerCase())
+            );
+            
+            if (carteiraEncontrada && carteiraEncontrada.id) {
+              carteiraId = carteiraEncontrada.id;
+            } else if (carteiras.length > 0 && carteiras[0].id) {
+              // Usa primeira carteira disponível
+              carteiraId = carteiras[0].id;
+            } else {
+              // Cria nova carteira se não encontrou
+              const novaCarteiraId = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
+                nome: tipoCarteiraNecessario === 'credito' ? 'Cartão de Crédito' : 'Cartão de Débito',
+                descricao: `Carteira ${tipoCarteiraNecessario}`,
+                padrao: false
+              });
+              carteiraId = novaCarteiraId;
             }
-          } catch (error) {
-            console.warn('⚠️ Erro ao buscar telefone do usuário:', error);
-          }
-          
-          // SSE desabilitado - usando apenas botão de atualizar manual
-          // notificarClientesSSE(telefoneParaNotificar, 'transacao-nova', {
-          //   id: transacaoId,
-          //   tipo: 'transacao',
-          //   mensagem: 'Nova transação registrada'
-          // }, c.env.financezap_db);
-          
-          // if (telefoneParaNotificar !== telefoneFormatado) {
-          //   notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
-          //     id: transacaoId,
-          //     tipo: 'transacao',
-          //     mensagem: 'Nova transação registrada'
-          //   }, c.env.financezap_db);
-          // }
-          
-          // if (telefoneParaNotificar !== cleanFromNumber) {
-          //   notificarClientesSSE(cleanFromNumber, 'transacao-nova', {
-          //     id: transacaoId,
-          //     tipo: 'transacao',
-          //     mensagem: 'Nova transação registrada'
-          //   }, c.env.financezap_db);
-          // }
-          
-          // Calcula total
-          if (tipoFinal === 'entrada') {
-            total += transacaoExtraida.valor;
-          } else {
-            total -= transacaoExtraida.valor;
+            
+            const transacaoId = await salvarTransacao(c.env.financezap_db, {
+              telefone: telefoneFormatado,
+              descricao: transacaoParaConfirmar.descricao,
+              valor: transacaoParaConfirmar.valor,
+              categoria: transacaoParaConfirmar.categoria || 'outros',
+              tipo: transacaoParaConfirmar.tipo,
+              metodo: transacaoParaConfirmar.metodo || 'debito',
+              dataHora,
+              data,
+              mensagemOriginal: messageText,
+              carteiraId: carteiraId
+            });
+            
+            idsSalvos.push(transacaoId);
+          } catch (error: any) {
+            console.error(`❌ Erro ao salvar transação confirmada: ${error.message}`);
           }
         }
         
-        // Função para gerar identificador único (ex: AQTXU)
-        const gerarIdentificador = (id: number): string => {
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-          let resultado = '';
-          let num = id;
-          for (let i = 0; i < 5; i++) {
-            resultado += chars[num % chars.length];
-            num = Math.floor(num / chars.length);
-          }
-          return resultado.split('').reverse().join('');
-        };
+        removerConfirmacaoPendente(cleanFromNumber);
         
-        // Prepara resposta detalhada e completa
-        if (transacoesExtraidas.length === 1) {
-          const t = transacoesExtraidas[0];
-          const tipoFinal = (t.tipo && t.tipo.toLowerCase().trim() === 'entrada') ? 'entrada' : 'saida';
-          const identificador = gerarIdentificador(ultimoTransacaoId);
-          const dataFormatada = new Date(dataHora).toLocaleDateString('pt-BR');
-          const tipoEmoji = tipoFinal === 'entrada' ? '💰' : '🔴';
-          const tipoTexto = tipoFinal === 'entrada' ? 'Receita' : 'Despesa';
-          
-          resposta = `*Transação registrada com sucesso!*\n\n`;
-          resposta += `*Identificador:* ${identificador}\n\n`;
-          resposta += `*Resumo da transação:*\n`;
-          resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
-          resposta += `📄 *Descrição:* ${t.descricao}\n`;
-          resposta += `💰 *Valor:* R$ ${t.valor.toFixed(2).replace('.', ',')}\n`;
-          resposta += `🔄 *Tipo:* ${tipoEmoji} ${tipoTexto}\n`;
-          resposta += `🏷️ *Categoria:* ${t.categoria}\n`;
-          resposta += `📋 *Subcategoria:* —\n`;
-          resposta += `🏦 *Conta:* —\n`;
-          resposta += `📅 *Data:* ${dataFormatada}\n`;
-          resposta += `💵 *Pago:* ✔\n`;
-          resposta += `📌 *Despesa fixa:* ✗ (Variável)\n\n`;
-          resposta += `❌ *Para excluir diga:* "Excluir transação ${identificador}"\n\n`;
-          resposta += `📊 *Consulte gráficos e relatórios completos em:*\n`;
-          resposta += `usezela.com/painel\n\n`;
-          resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
-          resposta += `⚡ *Ações rápidas*\n`;
-          resposta += `• Ver resumo financeiro do mês\n`;
-          resposta += `• Excluir esta transação`;
-        } else {
-          resposta = `✅ *${transacoesExtraidas.length} transações registradas!*\n\n`;
-          transacoesExtraidas.forEach((t, index) => {
-            const tipoFinal = (t.tipo && t.tipo.toLowerCase().trim() === 'entrada') ? 'entrada' : 'saida';
-            const tipoEmoji = tipoFinal === 'entrada' ? '💰' : '🔴';
-            resposta += `${index + 1}. ${t.descricao} - R$ ${t.valor.toFixed(2).replace('.', ',')} (${t.categoria}) - ${tipoEmoji} ${tipoFinal === 'entrada' ? 'Receita' : 'Despesa'}\n`;
-          });
-          resposta += `\n📊 *Consulte gráficos e relatórios completos em:*\n`;
-          resposta += `usezela.com/painel`;
+        // MELHORIA: Busca estatísticas para sugestão proativa
+        const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: cleanFromNumber });
+        const transacoesRecentes = await buscarTransacoes(c.env.financezap_db, {
+          telefone: cleanFromNumber,
+          limit: 10
+        });
+        
+        const sugestao = criarSugestaoProativa(estatisticas, transacoesRecentes.transacoes);
+        
+        const respostaConfirmacao = `✅ ${idsSalvos.length} transação(ões) confirmada(s) e salva(s) com sucesso!` + (sugestao ? `\n\n${sugestao}` : '');
+        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaConfirmacao);
+        
+        const mensagens = dividirMensagem(respostaConfirmacao);
+        for (const msg of mensagens) {
+          await enviarMensagemZApi(telefoneFormatado, msg, c.env);
         }
         
-        await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
-        console.log('✅ Confirmação enviada para:', telefoneFormatado);
-      } else {
-        console.log('⚠️ Nenhuma transação financeira encontrada na mensagem');
-        // Envia mensagem amigável quando não entende
-        const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
-        await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
+        return c.json({ success: true, message: 'Transações confirmadas e salvas' });
+      } else if (isCancelamento(mensagemLower)) {
+        removerConfirmacaoPendente(cleanFromNumber);
+        const respostaCancelamento = '❌ Transações canceladas. Nada foi salvo.';
+        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaCancelamento);
+        await enviarMensagemZApi(telefoneFormatado, respostaCancelamento, c.env);
+        return c.json({ success: true, message: 'Confirmação cancelada' });
+      } else if (isEdicao(mensagemLower)) {
+        removerConfirmacaoPendente(cleanFromNumber);
+        const respostaEdicao = '✏️ Para editar, envie a transação novamente com as informações corretas.';
+        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaEdicao);
+        await enviarMensagemZApi(telefoneFormatado, respostaEdicao, c.env);
+        return c.json({ success: true, message: 'Edição solicitada' });
       }
+    }
+    
+    // MELHORIA: Processa comandos rápidos
+    if (intencao.intencao === 'comando' && intencao.detalhes?.comando) {
+      const comando = intencao.detalhes.comando;
+      let respostaComando = '';
+      
+      if (comando === 'ajuda' || comando === 'help') {
+        respostaComando = criarMenuAjuda();
+      } else if (comando === 'exemplos') {
+        respostaComando = criarMensagemExemplos();
+      } else if (comando === 'comandos') {
+        respostaComando = criarMensagemComandos();
+      } else if (comando === 'hoje') {
+        const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: cleanFromNumber });
+        respostaComando = `📊 *Resumo do Dia*\n\n` +
+          `💸 Gasto hoje: ${formatarMoeda(estatisticas.gastoHoje || 0)}\n` +
+          `📝 Transações: ${estatisticas.totalTransacoes || 0}`;
+      } else if (comando === 'mes') {
+        const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: cleanFromNumber });
+        respostaComando = formatarEstatisticasResumo(estatisticas);
+      } else {
+        respostaComando = `❓ Comando "${comando}" não reconhecido.\n\nDigite "/ajuda" para ver comandos disponíveis.`;
+      }
+      
+      await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaComando);
+      const mensagens = dividirMensagem(respostaComando);
+      
+      for (const msg of mensagens) {
+        await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+      }
+      
+      return c.json({ success: true, message: 'Comando processado' });
+    }
+    
+    // MELHORIA: Processa pedido de ajuda
+    if (intencao.intencao === 'ajuda') {
+      const respostaAjuda = criarMenuAjuda();
+      await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaAjuda);
+      const mensagens = dividirMensagem(respostaAjuda);
+      
+      for (const msg of mensagens) {
+        await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+      }
+      
+      return c.json({ success: true, message: 'Ajuda enviada' });
+    }
+    
+    // Se não foi agendamento, processa como transação usando IA
+    console.log('💰 Processando como transação com IA...');
+    
+    // MELHORIA: Só processa se intenção for transação ou desconhecida
+    if (intencao.intencao === 'transacao' || intencao.intencao === 'desconhecida') {
+      try {
+        // Processa mensagem com IA para extrair transações
+        const transacoesExtraidas = await processarMensagemComIAWorker(messageText, c.env);
+        
+        if (transacoesExtraidas && transacoesExtraidas.length > 0) {
+          console.log(`✅ ${transacoesExtraidas.length} transação(ões) extraída(s) pela IA`);
+          
+          // MELHORIA: Valida qualidade da extração
+          const scoreExtracao = calcularScoreMedio(transacoesExtraidas.map(t => ({
+            descricao: t.descricao,
+            valor: t.valor,
+            categoria: t.categoria,
+            tipo: t.tipo,
+            metodo: t.metodo
+          })));
+          
+          console.log(`📊 Score de qualidade: ${scoreExtracao.valor.toFixed(2)} - ${scoreExtracao.motivo}`);
+          
+          // MELHORIA: Se qualidade baixa, pede mais informações
+          if (devePedirMaisInformacoes(scoreExtracao)) {
+            let respostaQualidade = `⚠️ Preciso de mais informações:\n\n`;
+            scoreExtracao.problemas.forEach((p, i) => {
+              respostaQualidade += `${i + 1}. ${p}\n`;
+            });
+            respostaQualidade += `\n💡 ${scoreExtracao.sugestoes.join('\n💡 ')}`;
+            
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaQualidade);
+            const mensagens = dividirMensagem(respostaQualidade);
+            
+            for (const msg of mensagens) {
+              await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+            }
+            
+            return c.json({ success: true, message: 'Solicitando mais informações' });
+          }
+          
+          // MELHORIA: Prepara transações para confirmação
+          const transacoesParaConfirmar: TransacaoParaConfirmar[] = transacoesExtraidas.map(t => ({
+            descricao: t.descricao,
+            valor: t.valor,
+            categoria: t.categoria,
+            tipo: t.tipo,
+            metodo: t.metodo || 'debito',
+            carteiraNome: undefined
+          }));
+          
+          // MELHORIA: Cria confirmação pendente
+          criarConfirmacaoPendente(cleanFromNumber, transacoesParaConfirmar);
+          
+          // MELHORIA: Formata mensagem de confirmação
+          const mensagemConfirmacao = formatarMensagemConfirmacao(transacoesParaConfirmar);
+          
+          // MELHORIA: Adiciona ao contexto
+          await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagemConfirmacao);
+          
+          // MELHORIA: Divide mensagem se necessário
+          const mensagens = dividirMensagem(mensagemConfirmacao);
+          
+          // MELHORIA: Envia mensagens divididas
+          for (const msg of mensagens) {
+            await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+          }
+          
+          return c.json({ 
+            success: true, 
+            message: 'Confirmação pendente - aguardando resposta do usuário' 
+          });
+        } else {
+          // MELHORIA: Se não encontrou transação, verifica se é pergunta
+          if (intencao.intencao === 'pergunta') {
+            console.log('❓ Pergunta detectada, usando chat de IA...');
+            
+            const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: cleanFromNumber });
+            const transacoesRecentes = await buscarTransacoes(c.env.financezap_db, {
+              telefone: cleanFromNumber,
+              limit: 10
+            });
+            
+            const historicoTexto = formatarHistoricoParaPrompt(contexto);
+            
+            // Processa pergunta com chat IA (precisa implementar função similar)
+            const respostaIA = '💡 Para perguntas sobre suas finanças, acesse o portal web em usezela.com/painel';
+            
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaIA);
+            const mensagens = dividirMensagem(respostaIA);
+            
+            for (const msg of mensagens) {
+              await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+            }
+            
+            return c.json({ success: true, message: 'Pergunta respondida' });
+          } else {
+            console.log('⚠️ Nenhuma transação financeira encontrada na mensagem');
+            // MELHORIA: Mensagem mais útil quando não entende
+            const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
+              '💡 *Dicas:*\n' +
+              '• Para registrar gasto: "comprei café por 5 reais"\n' +
+              '• Para registrar receita: "recebi 500 reais"\n' +
+              '• Para ver resumo: "resumo financeiro"\n' +
+              '• Para ajuda: "ajuda" ou "/ajuda"';
+            
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagemAmigavel);
+            await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
+          }
+        }
     } catch (error: any) {
       console.error('❌ Erro ao processar mensagem com IA:', error.message);
       // Envia mensagem amigável em caso de erro
