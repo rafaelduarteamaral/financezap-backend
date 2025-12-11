@@ -35,5 +35,5 @@ head_sampling_rate = 1
 
 # Cron Triggers - Notificações automáticas de agendamentos
 # Executa diariamente às 8h (horário UTC)
-[[triggers.crons]]
-cron = "0 8 * * *"
+[triggers]
+crons = ["0 8 * * *"]
