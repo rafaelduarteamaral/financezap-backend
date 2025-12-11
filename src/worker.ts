@@ -59,16 +59,6 @@ import {
   type IntencaoUsuario 
 } from './deteccaoIntencao';
 import {
-  criarConfirmacaoPendente,
-  obterConfirmacaoPendente,
-  removerConfirmacaoPendente,
-  formatarMensagemConfirmacao,
-  isConfirmacao,
-  isCancelamento,
-  isEdicao,
-  type TransacaoParaConfirmar
-} from './confirmacaoTransacoes';
-import {
   obterContextoConversacaoD1,
   adicionarMensagemContextoD1,
   formatarHistoricoParaPrompt,
@@ -3703,105 +3693,6 @@ app.post('/webhook/zapi', async (c) => {
     const intencao = detectarIntencao(messageText, contexto);
     console.log(`🎯 Intenção detectada: ${intencao.intencao} (confiança: ${intencao.confianca})`);
     
-    // MELHORIA: Verifica se há confirmação pendente
-    const confirmacaoPendente = obterConfirmacaoPendente(cleanFromNumber);
-    
-    // Se há confirmação pendente, processa confirmação/cancelamento/edição
-    if (confirmacaoPendente) {
-      const mensagemLower = messageText.toLowerCase().trim();
-      
-      if (isConfirmacao(mensagemLower)) {
-        // Confirma e salva transações
-        console.log('✅ Confirmação recebida, salvando transações...');
-        
-        const idsSalvos: number[] = [];
-        const dataHora = new Date().toISOString();
-        const data = dataHora.slice(0, 10);
-        
-        for (const transacaoParaConfirmar of confirmacaoPendente.transacoes) {
-          try {
-            const tipoCarteiraNecessario = (transacaoParaConfirmar.metodo || 'debito') as 'debito' | 'credito';
-            
-            // Busca ou cria carteira apropriada
-            const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
-            let carteiraId: number | null = null;
-            
-            // Tenta encontrar carteira do tipo correto (busca por nome)
-            const tipoNome = tipoCarteiraNecessario === 'credito' ? 'Crédito' : 'Débito';
-            const carteiraEncontrada = carteiras.find(c => 
-              c.nome.toLowerCase().includes(tipoCarteiraNecessario) ||
-              c.nome.toLowerCase().includes(tipoNome.toLowerCase())
-            );
-            
-            if (carteiraEncontrada && carteiraEncontrada.id) {
-              carteiraId = carteiraEncontrada.id;
-            } else if (carteiras.length > 0 && carteiras[0].id) {
-              // Usa primeira carteira disponível
-              carteiraId = carteiras[0].id;
-            } else {
-              // Cria nova carteira se não encontrou
-              const novaCarteiraId = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
-                nome: tipoCarteiraNecessario === 'credito' ? 'Cartão de Crédito' : 'Cartão de Débito',
-                descricao: `Carteira ${tipoCarteiraNecessario}`,
-                padrao: false
-              });
-              carteiraId = novaCarteiraId;
-            }
-            
-            const transacaoId = await salvarTransacao(c.env.financezap_db, {
-              telefone: telefoneFormatado,
-              descricao: transacaoParaConfirmar.descricao,
-              valor: transacaoParaConfirmar.valor,
-              categoria: transacaoParaConfirmar.categoria || 'outros',
-              tipo: transacaoParaConfirmar.tipo,
-              metodo: transacaoParaConfirmar.metodo || 'debito',
-              dataHora,
-              data,
-              mensagemOriginal: messageText,
-              carteiraId: carteiraId
-            });
-            
-            idsSalvos.push(transacaoId);
-          } catch (error: any) {
-            console.error(`❌ Erro ao salvar transação confirmada: ${error.message}`);
-          }
-        }
-        
-        removerConfirmacaoPendente(cleanFromNumber);
-        
-        // MELHORIA: Busca estatísticas para sugestão proativa
-        const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: cleanFromNumber });
-        const transacoesRecentes = await buscarTransacoes(c.env.financezap_db, {
-          telefone: cleanFromNumber,
-          limit: 10
-        });
-        
-        const sugestao = criarSugestaoProativa(estatisticas, transacoesRecentes.transacoes);
-        
-        const respostaConfirmacao = `✅ ${idsSalvos.length} transação(ões) confirmada(s) e salva(s) com sucesso!` + (sugestao ? `\n\n${sugestao}` : '');
-        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaConfirmacao);
-        
-        const mensagens = dividirMensagem(respostaConfirmacao);
-        for (const msg of mensagens) {
-          await enviarMensagemZApi(telefoneFormatado, msg, c.env);
-        }
-        
-        return c.json({ success: true, message: 'Transações confirmadas e salvas' });
-      } else if (isCancelamento(mensagemLower)) {
-        removerConfirmacaoPendente(cleanFromNumber);
-        const respostaCancelamento = '❌ Transações canceladas. Nada foi salvo.';
-        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaCancelamento);
-        await enviarMensagemZApi(telefoneFormatado, respostaCancelamento, c.env);
-        return c.json({ success: true, message: 'Confirmação cancelada' });
-      } else if (isEdicao(mensagemLower)) {
-        removerConfirmacaoPendente(cleanFromNumber);
-        const respostaEdicao = '✏️ Para editar, envie a transação novamente com as informações corretas.';
-        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaEdicao);
-        await enviarMensagemZApi(telefoneFormatado, respostaEdicao, c.env);
-        return c.json({ success: true, message: 'Edição solicitada' });
-      }
-    }
-    
     // MELHORIA: Processa comandos rápidos
     if (intencao.intencao === 'comando' && intencao.detalhes?.comando) {
       const comando = intencao.detalhes.comando;
@@ -3915,36 +3806,88 @@ app.post('/webhook/zapi', async (c) => {
             return c.json({ success: true, message: 'Solicitando mais informações' });
           }
           
-          // MELHORIA: Prepara transações para confirmação
-          const transacoesParaConfirmar: TransacaoParaConfirmar[] = transacoesExtraidas.map(t => ({
-            descricao: t.descricao,
-            valor: t.valor,
-            categoria: t.categoria,
-            tipo: t.tipo,
-            metodo: t.metodo || 'debito',
-            carteiraNome: undefined
-          }));
+          // Salva transações diretamente sem confirmação
+          const dataHora = new Date().toISOString();
+          const data = dataHora.slice(0, 10);
+          const idsSalvos: number[] = [];
           
-          // MELHORIA: Cria confirmação pendente
-          criarConfirmacaoPendente(cleanFromNumber, transacoesParaConfirmar);
-          
-          // MELHORIA: Formata mensagem de confirmação
-          const mensagemConfirmacao = formatarMensagemConfirmacao(transacoesParaConfirmar);
-          
-          // MELHORIA: Adiciona ao contexto
-          await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagemConfirmacao);
-          
-          // MELHORIA: Divide mensagem se necessário
-          const mensagens = dividirMensagem(mensagemConfirmacao);
-          
-          // MELHORIA: Envia mensagens divididas
-          for (const msg of mensagens) {
-            await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+          for (const transacaoExtraida of transacoesExtraidas) {
+            try {
+              const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
+                ? 'entrada' 
+                : 'saida';
+              
+              const tipoCarteiraNecessario = (transacaoExtraida.metodo || 'debito') as 'debito' | 'credito';
+              
+              // Busca ou cria carteira apropriada
+              const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+              let carteiraId: number | null = null;
+              
+              const tipoNome = tipoCarteiraNecessario === 'credito' ? 'Crédito' : 'Débito';
+              const carteiraEncontrada = carteiras.find(c => 
+                c.nome.toLowerCase().includes(tipoCarteiraNecessario) ||
+                c.nome.toLowerCase().includes(tipoNome.toLowerCase())
+              );
+              
+              if (carteiraEncontrada && carteiraEncontrada.id) {
+                carteiraId = carteiraEncontrada.id;
+              } else if (carteiras.length > 0 && carteiras[0].id) {
+                carteiraId = carteiras[0].id;
+              } else {
+                const novaCarteiraId = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
+                  nome: tipoCarteiraNecessario === 'credito' ? 'Cartão de Crédito' : 'Cartão de Débito',
+                  descricao: `Carteira ${tipoCarteiraNecessario}`,
+                  padrao: false
+                });
+                carteiraId = novaCarteiraId;
+              }
+              
+              const transacaoId = await salvarTransacao(c.env.financezap_db, {
+                telefone: telefoneFormatado,
+                descricao: transacaoExtraida.descricao,
+                valor: transacaoExtraida.valor,
+                categoria: transacaoExtraida.categoria || 'outros',
+                tipo: tipoFinal,
+                metodo: (transacaoExtraida.metodo && transacaoExtraida.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito',
+                dataHora,
+                data,
+                mensagemOriginal: messageText,
+                carteiraId: carteiraId
+              });
+              
+              idsSalvos.push(transacaoId);
+              console.log(`✅ Transação salva (ID: ${transacaoId}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
+            } catch (error: any) {
+              console.error(`❌ Erro ao salvar transação: ${error.message}`);
+            }
           }
+          
+          // Formata mensagem simplificada
+          let resposta = '';
+          if (transacoesExtraidas.length === 1) {
+            const t = transacoesExtraidas[0];
+            const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
+            resposta = `✅ Transação registrada!\n\n`;
+            resposta += `${tipoEmoji} ${t.descricao}\n`;
+            resposta += `💰 R$ ${t.valor.toFixed(2)}\n`;
+            resposta += `🏷️ ${t.categoria}`;
+          } else {
+            resposta = `✅ ${transacoesExtraidas.length} transações registradas!\n\n`;
+            transacoesExtraidas.forEach((t, index) => {
+              const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
+              resposta += `${index + 1}. ${tipoEmoji} ${t.descricao} - R$ ${t.valor.toFixed(2)}\n`;
+            });
+          }
+          
+          // Adiciona ao contexto
+          await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+          
+          // Envia resposta
+          await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
           
           return c.json({ 
             success: true, 
-            message: 'Confirmação pendente - aguardando resposta do usuário' 
+            message: 'Transações salvas com sucesso' 
           });
         } else {
           // MELHORIA: Se não encontrou transação, verifica se é pergunta
@@ -4072,33 +4015,14 @@ app.post('/webhook/zapi', async (c) => {
           return resultado.split('').reverse().join('');
         };
         
-        // Prepara resposta completa (mesmo formato da resposta principal)
-        const identificador = gerarIdentificador(transacaoId);
-        const dataFormatada = new Date(dataHora).toLocaleDateString('pt-BR');
-        const tipoTexto = tipo === 'entrada' ? 'Receita' : 'Despesa';
-        const tipoEmoji = tipo === 'entrada' ? '💰' : '🔴';
+        // Formata mensagem simplificada
+        const tipoEmoji = tipo === 'entrada' ? '💰' : '💸';
         const descricaoCompleta = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
         
-        let resposta = `*Transação registrada com sucesso!*\n\n`;
-        resposta += `*Identificador:* ${identificador}\n\n`;
-        resposta += `*Resumo da transação:*\n`;
-        resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
-        resposta += `📄 *Descrição:* ${descricaoCompleta}\n`;
-        resposta += `💰 *Valor:* R$ ${valor.toFixed(2).replace('.', ',')}\n`;
-        resposta += `🔄 *Tipo:* ${tipoEmoji} ${tipoTexto}\n`;
-        resposta += `🏷️ *Categoria:* outros\n`;
-        resposta += `📋 *Subcategoria:* —\n`;
-        resposta += `🏦 *Conta:* —\n`;
-        resposta += `📅 *Data:* ${dataFormatada}\n`;
-        resposta += `💵 *Pago:* ✔\n`;
-        resposta += `📌 *Despesa fixa:* ✗ (Variável)\n\n`;
-        resposta += `❌ *Para excluir diga:* "Excluir transação ${identificador}"\n\n`;
-        resposta += `📊 *Consulte gráficos e relatórios completos em:*\n`;
-        resposta += `usezela.com/painel\n\n`;
-        resposta += `━━━━━━━━━━━━━━━━━━━━\n`;
-        resposta += `⚡ *Ações rápidas*\n`;
-        resposta += `• Ver resumo financeiro do mês\n`;
-        resposta += `• Excluir esta transação`;
+        let resposta = `✅ Transação registrada!\n\n`;
+        resposta += `${tipoEmoji} ${descricaoCompleta}\n`;
+        resposta += `💰 R$ ${valor.toFixed(2)}\n`;
+        resposta += `🏷️ outros`;
         
         await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
       }

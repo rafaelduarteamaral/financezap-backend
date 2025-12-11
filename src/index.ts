@@ -15,16 +15,6 @@ import {
   type IntencaoUsuario 
 } from './deteccaoIntencao';
 import {
-  criarConfirmacaoPendente,
-  obterConfirmacaoPendente,
-  removerConfirmacaoPendente,
-  formatarMensagemConfirmacao,
-  isConfirmacao,
-  isCancelamento,
-  isEdicao,
-  type TransacaoParaConfirmar
-} from './confirmacaoTransacoes';
-import {
   obterContextoConversacao,
   adicionarMensagemContexto,
   formatarHistoricoParaPrompt,
@@ -870,118 +860,6 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
         const intencao = detectarIntencao(messageText, contexto);
         console.log(`🎯 Intenção detectada: ${intencao.intencao} (confiança: ${intencao.confianca})`);
         
-        // MELHORIA: Verifica se há confirmação pendente
-        const confirmacaoPendente = obterConfirmacaoPendente(cleanFromNumber);
-        
-        // Se há confirmação pendente, processa confirmação/cancelamento/edição
-        if (confirmacaoPendente) {
-          if (isConfirmacao(mensagemLower)) {
-            // Confirma e salva transações
-            console.log('✅ Confirmação recebida, salvando transações...');
-            
-            const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
-              ? cleanFromNumber 
-              : cleanFromNumber.startsWith('+')
-              ? `whatsapp:${cleanFromNumber}`
-              : `whatsapp:+${cleanFromNumber}`;
-            
-            const idsSalvos: number[] = [];
-            
-            for (const transacaoParaConfirmar of confirmacaoPendente.transacoes) {
-              try {
-                const tipoCarteiraNecessario = (transacaoParaConfirmar.metodo || 'debito') as 'debito' | 'credito';
-                const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
-                
-                const transacao: Transacao = {
-                  telefone: cleanFromNumber,
-                  descricao: transacaoParaConfirmar.descricao,
-                  valor: transacaoParaConfirmar.valor,
-                  categoria: transacaoParaConfirmar.categoria || 'outros',
-                  tipo: transacaoParaConfirmar.tipo,
-                  metodo: transacaoParaConfirmar.metodo || 'debito',
-                  dataHora: new Date().toLocaleString('pt-BR'),
-                  data: new Date().toISOString().split('T')[0],
-                  mensagemOriginal: messageText,
-                  carteiraId: carteiraApropriada.id
-                };
-                
-                const id = await salvarTransacao(transacao);
-                idsSalvos.push(id);
-              } catch (error: any) {
-                console.error(`❌ Erro ao salvar transação confirmada: ${error.message}`);
-              }
-            }
-            
-            removerConfirmacaoPendente(cleanFromNumber);
-            
-            // MELHORIA: Adiciona resposta ao contexto
-            const respostaConfirmacao = `✅ ${idsSalvos.length} transação(ões) confirmada(s) e salva(s) com sucesso!`;
-            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaConfirmacao);
-            
-            // MELHORIA: Busca estatísticas para sugestão proativa
-            const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
-            const transacoesRecentes = await buscarTransacoesComFiltros({
-              telefone: cleanFromNumber,
-              limit: 10
-            });
-            
-            const sugestao = criarSugestaoProativa(estatisticas, transacoesRecentes.transacoes);
-            
-            // MELHORIA: Divide mensagem se necessário
-            const mensagens = dividirMensagem(respostaConfirmacao + (sugestao ? `\n\n${sugestao}` : ''));
-            
-            for (const msg of mensagens) {
-              if (zapiEstaConfigurada()) {
-                await enviarMensagemZApi(fromNumber, msg);
-              } else if (twilioWhatsAppNumber) {
-                await client.messages.create({
-                  from: twilioWhatsAppNumber,
-                  to: fromNumber,
-                  body: msg
-                });
-              }
-            }
-            
-            return res.json({ success: true, message: 'Transações confirmadas e salvas' });
-          } else if (isCancelamento(mensagemLower)) {
-            // Cancela confirmação
-            console.log('❌ Confirmação cancelada pelo usuário');
-            removerConfirmacaoPendente(cleanFromNumber);
-            
-            const respostaCancelamento = '❌ Transações canceladas. Nada foi salvo.';
-            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaCancelamento);
-            
-            if (zapiEstaConfigurada()) {
-              await enviarMensagemZApi(fromNumber, respostaCancelamento);
-            } else if (twilioWhatsAppNumber) {
-              await client.messages.create({
-                from: twilioWhatsAppNumber,
-                to: fromNumber,
-                body: respostaCancelamento
-              });
-            }
-            
-            return res.json({ success: true, message: 'Confirmação cancelada' });
-          } else if (isEdicao(mensagemLower)) {
-            // Permite edição (por enquanto, cancela e pede para reenviar)
-            removerConfirmacaoPendente(cleanFromNumber);
-            const respostaEdicao = '✏️ Para editar, envie a transação novamente com as informações corretas.';
-            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaEdicao);
-            
-            if (zapiEstaConfigurada()) {
-              await enviarMensagemZApi(fromNumber, respostaEdicao);
-            } else if (twilioWhatsAppNumber) {
-              await client.messages.create({
-                from: twilioWhatsAppNumber,
-                to: fromNumber,
-                body: respostaEdicao
-              });
-            }
-            
-            return res.json({ success: true, message: 'Edição solicitada' });
-          }
-        }
-        
         // MELHORIA: Processa comandos rápidos
         if (intencao.intencao === 'comando' && intencao.detalhes?.comando) {
           const comando = intencao.detalhes.comando;
@@ -1505,44 +1383,97 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               return res.json({ success: true, message: 'Solicitando mais informações' });
             }
             
-            // MELHORIA: Prepara transações para confirmação
-            const transacoesParaConfirmar: TransacaoParaConfirmar[] = transacoesExtraidas.map(t => ({
-              descricao: t.descricao,
-              valor: t.valor,
-              categoria: t.categoria,
-              tipo: t.tipo,
-              metodo: t.metodo || 'debito',
-              carteiraNome: t.carteiraNome
-            }));
+            // Salva transações diretamente sem confirmação
+            const telefoneFormatado = cleanFromNumber.startsWith('whatsapp:') 
+              ? cleanFromNumber 
+              : cleanFromNumber.startsWith('+')
+              ? `whatsapp:${cleanFromNumber}`
+              : `whatsapp:+${cleanFromNumber}`;
             
-            // MELHORIA: Cria confirmação pendente
-            criarConfirmacaoPendente(cleanFromNumber, transacoesParaConfirmar);
+            const idsSalvos: number[] = [];
+            const dataAtual = new Date().toISOString().split('T')[0];
             
-            // MELHORIA: Formata mensagem de confirmação
-            const mensagemConfirmacao = formatarMensagemConfirmacao(transacoesParaConfirmar);
-            
-            // MELHORIA: Adiciona ao contexto
-            await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemConfirmacao);
-            
-            // MELHORIA: Divide mensagem se necessário
-            const mensagens = dividirMensagem(mensagemConfirmacao);
-            
-            // MELHORIA: Envia mensagens divididas
-            for (const msg of mensagens) {
-              if (zapiEstaConfigurada()) {
-                await enviarMensagemZApi(fromNumber, msg);
-              } else if (twilioWhatsAppNumber) {
-                await client.messages.create({
-                  from: twilioWhatsAppNumber,
-                  to: fromNumber,
-                  body: msg
-                });
+            for (const transacaoExtraida of transacoesExtraidas) {
+              try {
+                const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
+                  ? 'entrada' 
+                  : 'saida';
+                
+                const tipoCarteiraNecessario = (transacaoExtraida.metodo || 'debito') as 'debito' | 'credito';
+                
+                // Busca ou cria carteira apropriada
+                let carteiraIdParaTransacao: number | null = null;
+                if (transacaoExtraida.carteiraNome) {
+                  const carteirasUsuario = await buscarCarteirasPorTelefone(telefoneFormatado);
+                  const carteiraEncontrada = carteirasUsuario.find(c => 
+                    c.nome.toLowerCase().includes(transacaoExtraida.carteiraNome!.toLowerCase()) ||
+                    transacaoExtraida.carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
+                  );
+                  if (carteiraEncontrada && carteiraEncontrada.tipo === tipoCarteiraNecessario) {
+                    carteiraIdParaTransacao = carteiraEncontrada.id;
+                  }
+                }
+                
+                if (!carteiraIdParaTransacao) {
+                  const carteiraApropriada = await buscarOuCriarCarteiraPorTipo(telefoneFormatado, tipoCarteiraNecessario);
+                  carteiraIdParaTransacao = carteiraApropriada.id;
+                }
+                
+                const transacao: Transacao = {
+                  telefone: cleanFromNumber,
+                  descricao: transacaoExtraida.descricao,
+                  valor: transacaoExtraida.valor,
+                  categoria: transacaoExtraida.categoria || 'outros',
+                  tipo: tipoFinal,
+                  metodo: transacaoExtraida.metodo || 'debito',
+                  dataHora: new Date().toLocaleString('pt-BR'),
+                  data: dataAtual,
+                  mensagemOriginal: messageText,
+                  carteiraId: carteiraIdParaTransacao
+                };
+                
+                const id = await salvarTransacao(transacao);
+                idsSalvos.push(id);
+                console.log(`✅ Transação salva (ID: ${id}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
+              } catch (error: any) {
+                console.error(`❌ Erro ao salvar transação: ${error.message}`);
               }
+            }
+            
+            // Formata mensagem simplificada
+            let resposta = '';
+            if (transacoesExtraidas.length === 1) {
+              const t = transacoesExtraidas[0];
+              const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
+              resposta = `✅ Transação registrada!\n\n`;
+              resposta += `${tipoEmoji} ${t.descricao}\n`;
+              resposta += `💰 R$ ${t.valor.toFixed(2)}\n`;
+              resposta += `🏷️ ${t.categoria}`;
+            } else {
+              resposta = `✅ ${transacoesExtraidas.length} transações registradas!\n\n`;
+              transacoesExtraidas.forEach((t, index) => {
+                const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
+                resposta += `${index + 1}. ${tipoEmoji} ${t.descricao} - R$ ${t.valor.toFixed(2)}\n`;
+              });
+            }
+            
+            // Adiciona ao contexto
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', resposta);
+            
+            // Envia resposta
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, resposta);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: resposta
+              });
             }
             
             return res.json({ 
               success: true, 
-              message: 'Confirmação pendente - aguardando resposta do usuário' 
+              message: 'Transações salvas com sucesso' 
             });
           } else {
             // MELHORIA: Se não encontrou transação, verifica se é pergunta
