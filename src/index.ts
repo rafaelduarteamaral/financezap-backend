@@ -672,6 +672,9 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'phone é obrigatório' });
     }
     
+    // Formata o número ANTES de processar áudio (para usar em mensagens de erro)
+    const fromNumber = phoneNumber.startsWith('55') ? `whatsapp:+${phoneNumber}` : `whatsapp:+55${phoneNumber}`;
+    
     // Processa áudio se houver (verifica também se existe objeto audio no body)
     const temAudio = body.audio && (body.audio.audioUrl || body.audio.url);
     const audioUrlFinal = temAudio ? (body.audio.audioUrl || body.audio.url) : mediaUrl;
@@ -759,8 +762,7 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
       return res.json({ success: true, message: 'Mensagem de grupo ignorada' });
     }
     
-    // Formata o número
-    const fromNumber = phoneNumber.startsWith('55') ? `whatsapp:+${phoneNumber}` : `whatsapp:+55${phoneNumber}`;
+    // fromNumber já foi declarado acima, apenas limpa para usar no banco
     const cleanFromNumber = fromNumber.replace('whatsapp:', '');
     
     console.log(`📱 Mensagem recebida de: ${fromNumber}`);
