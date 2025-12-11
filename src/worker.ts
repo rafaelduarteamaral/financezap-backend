@@ -3821,6 +3821,7 @@ app.post('/webhook/zapi', async (c) => {
             tipo: 'entrada' | 'saida';
             metodo: 'credito' | 'debito';
             carteiraNome?: string;
+            id?: number;
           }> = [];
           
           for (const transacaoExtraida of transacoesExtraidas) {
@@ -3884,7 +3885,8 @@ app.post('/webhook/zapi', async (c) => {
                 categoria: transacaoExtraida.categoria || 'outros',
                 tipo: tipoFinal,
                 metodo: (transacaoExtraida.metodo && transacaoExtraida.metodo.toLowerCase() === 'credito') ? 'credito' : 'debito',
-                carteiraNome: carteiraNome
+                carteiraNome: carteiraNome,
+                id: transacaoId
               });
               
               console.log(`✅ Transação salva (ID: ${transacaoId}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
@@ -3905,18 +3907,20 @@ app.post('/webhook/zapi', async (c) => {
               tipo: t.tipo,
               metodo: t.metodo,
               carteiraNome: t.carteiraNome,
-              data: data
+              data: data,
+              id: idsSalvos[0] || undefined
             });
           } else {
             resposta = formatarMensagemMultiplasTransacoes(
-              transacoesSalvas.map(t => ({
+              transacoesSalvas.map((t, index) => ({
                 descricao: t.descricao,
                 valor: t.valor,
                 categoria: t.categoria,
                 tipo: t.tipo,
                 metodo: t.metodo,
                 carteiraNome: t.carteiraNome,
-                data: data
+                data: data,
+                id: idsSalvos[index] || undefined
               }))
             );
           }

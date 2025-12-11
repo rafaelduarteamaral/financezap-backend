@@ -515,50 +515,74 @@ app.post('/webhook/whatsapp', async (req, res) => {
         metodo: 'credito' | 'debito';
         carteiraNome?: string;
         data: string;
+        id?: number;
       }> = [];
+      const idsSalvos: number[] = [];
       
       // Coleta dados das transações salvas
       for (const transacaoExtraida of transacoesExtraidas) {
         if (transacaoExtraida.sucesso) {
-          const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
-            ? 'entrada' 
-            : 'saida';
-          
-          // Busca nome da carteira
-          let carteiraNome: string | undefined = undefined;
-          let carteiraId: number | null = null;
-          
-          if (transacaoExtraida.carteiraNome) {
-            const carteiras = await buscarCarteirasPorTelefone(cleanFromNumber);
-            const carteiraEncontrada = carteiras.find(
-              c => c.nome.toLowerCase().includes(transacaoExtraida.carteiraNome!.toLowerCase()) ||
-                   transacaoExtraida.carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
-            );
-            if (carteiraEncontrada) {
-              carteiraId = carteiraEncontrada.id;
-              carteiraNome = carteiraEncontrada.nome;
+          try {
+            const tipoFinal = (transacaoExtraida.tipo && transacaoExtraida.tipo.toLowerCase().trim() === 'entrada') 
+              ? 'entrada' 
+              : 'saida';
+            
+            // Busca carteira mencionada ou usa a padrão
+            let carteiraId: number | null = null;
+            let carteiraNome: string | undefined = undefined;
+            
+            if (transacaoExtraida.carteiraNome) {
+              const carteiras = await buscarCarteirasPorTelefone(cleanFromNumber);
+              const carteiraEncontrada = carteiras.find(
+                c => c.nome.toLowerCase().includes(transacaoExtraida.carteiraNome!.toLowerCase()) ||
+                     transacaoExtraida.carteiraNome!.toLowerCase().includes(c.nome.toLowerCase())
+              );
+              if (carteiraEncontrada) {
+                carteiraId = carteiraEncontrada.id;
+                carteiraNome = carteiraEncontrada.nome;
+              }
             }
-          }
-          
-          if (!carteiraId) {
-            const carteiraPadrao = await buscarCarteiraPadrao(cleanFromNumber);
-            if (carteiraPadrao) {
-              carteiraId = carteiraPadrao.id;
-              carteiraNome = carteiraPadrao.nome;
+            
+            // Se não encontrou carteira mencionada, usa a padrão
+            if (!carteiraId) {
+              const carteiraPadrao = await buscarCarteiraPadrao(cleanFromNumber);
+              if (carteiraPadrao) {
+                carteiraId = carteiraPadrao.id;
+                carteiraNome = carteiraPadrao.nome;
+              }
             }
+            
+            const dataAtual = new Date().toISOString().split('T')[0];
+            
+            const transacao: Transacao = {
+              telefone: cleanFromNumber,
+              descricao: transacaoExtraida.descricao,
+              valor: transacaoExtraida.valor,
+              categoria: transacaoExtraida.categoria || 'outros',
+              tipo: tipoFinal,
+              metodo: transacaoExtraida.metodo || 'debito',
+              dataHora: mensagem.dataHora,
+              data: dataAtual,
+              mensagemOriginal: textoTranscrito ? `[Áudio transcrito] ${messageBody}` : messageBody,
+              carteiraId: carteiraId,
+            };
+            
+            const id = await salvarTransacao(transacao);
+            idsSalvos.push(id);
+            
+            transacoesSalvas.push({
+              descricao: transacaoExtraida.descricao,
+              valor: transacaoExtraida.valor,
+              categoria: transacaoExtraida.categoria || 'outros',
+              tipo: tipoFinal,
+              metodo: (transacaoExtraida.metodo || 'debito') as 'credito' | 'debito',
+              carteiraNome: carteiraNome,
+              data: dataAtual,
+              id: id
+            });
+          } catch (error) {
+            console.error('   ❌ Erro ao salvar transação:', error);
           }
-          
-          const dataAtual = new Date().toISOString().split('T')[0];
-          
-          transacoesSalvas.push({
-            descricao: transacaoExtraida.descricao,
-            valor: transacaoExtraida.valor,
-            categoria: transacaoExtraida.categoria || 'outros',
-            tipo: tipoFinal,
-            metodo: (transacaoExtraida.metodo || 'debito') as 'credito' | 'debito',
-            carteiraNome: carteiraNome,
-            data: dataAtual
-          });
         }
       }
       
@@ -1445,6 +1469,7 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               metodo: 'credito' | 'debito';
               carteiraId: number | null;
               carteiraNome?: string;
+              id?: number;
             }> = [];
             
             for (const transacaoExtraida of transacoesExtraidas) {
@@ -1501,7 +1526,8 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                   tipo: tipoFinal,
                   metodo: transacaoExtraida.metodo || 'debito',
                   carteiraId: carteiraIdParaTransacao,
-                  carteiraNome: carteiraNome
+                  carteiraNome: carteiraNome,
+                  id: id
                 });
                 
                 console.log(`✅ Transação salva (ID: ${id}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
@@ -1522,18 +1548,20 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
                 tipo: t.tipo,
                 metodo: t.metodo,
                 carteiraNome: t.carteiraNome,
-                data: dataAtual
+                data: dataAtual,
+                id: idsSalvos[0] || undefined
               });
             } else {
               resposta = formatarMensagemMultiplasTransacoes(
-                transacoesSalvas.map(t => ({
+                transacoesSalvas.map((t, index) => ({
                   descricao: t.descricao,
                   valor: t.valor,
                   categoria: t.categoria,
                   tipo: t.tipo,
                   metodo: t.metodo,
                   carteiraNome: t.carteiraNome,
-                  data: dataAtual
+                  data: dataAtual,
+                  id: idsSalvos[index] || undefined
                 }))
               );
             }

@@ -10,34 +10,66 @@ export interface DadosTransacao {
   metodo: 'credito' | 'debito';
   carteiraNome?: string;
   data?: string;
+  id?: number; // ID da transação para gerar identificador
 }
 
 /**
- * Formata mensagem de transação registrada de forma intuitiva
+ * Gera identificador único baseado no ID da transação
+ */
+function gerarIdentificador(id: number): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let resultado = '';
+  let num = id;
+  for (let i = 0; i < 5; i++) {
+    resultado += chars[num % chars.length];
+    num = Math.floor(num / chars.length);
+  }
+  return resultado.split('').reverse().join('');
+}
+
+/**
+ * Capitaliza primeira letra de cada palavra
+ */
+function capitalizar(texto: string): string {
+  return texto
+    .split(' ')
+    .map(palavra => palavra.charAt(0).toUpperCase() + palavra.slice(1).toLowerCase())
+    .join(' ');
+}
+
+/**
+ * Formata mensagem de transação registrada seguindo o padrão especificado
  */
 export function formatarMensagemTransacao(transacao: DadosTransacao): string {
-  const tipoEmoji = transacao.tipo === 'entrada' ? '💰' : '💸';
+  const tipoEmoji = transacao.tipo === 'entrada' ? '💰' : '🔴';
   const tipoTexto = transacao.tipo === 'entrada' ? 'Receita' : 'Despesa';
-  const metodoEmoji = transacao.metodo === 'credito' ? '💳' : '💵';
-  const metodoTexto = transacao.metodo === 'credito' ? 'Crédito' : 'Débito';
+  const categoriaCapitalizada = capitalizar(transacao.categoria);
+  const contaNome = transacao.carteiraNome || '—';
   
   const dataFormatada = transacao.data 
     ? new Date(transacao.data + 'T00:00:00').toLocaleDateString('pt-BR')
     : new Date().toLocaleDateString('pt-BR');
   
-  let mensagem = `✅ *Transação registrada!*\n\n`;
+  // Gera identificador se tiver ID
+  const identificador = transacao.id ? gerarIdentificador(transacao.id) : 'N/A';
   
-  mensagem += `${tipoEmoji} *${tipoTexto}*\n`;
-  mensagem += `📝 ${transacao.descricao}\n`;
-  mensagem += `💰 ${formatarMoeda(transacao.valor)}\n`;
-  mensagem += `🏷️ ${transacao.categoria}\n`;
-  mensagem += `${metodoEmoji} ${metodoTexto}`;
-  
-  if (transacao.carteiraNome) {
-    mensagem += `\n💳 Carteira: ${transacao.carteiraNome}`;
-  }
-  
-  mensagem += `\n📅 ${dataFormatada}`;
+  let mensagem = `*Transação Registrada Com Sucesso!*\n\n`;
+  mensagem += `*Identificador:* ${identificador}\n\n`;
+  mensagem += `*Resumo Da Transação:*\n`;
+  mensagem += `━━━━━━━━━━━━━━━━━━━━\n`;
+  mensagem += `📄 *Descrição:* ${transacao.descricao}\n`;
+  mensagem += `💰 *Valor:* ${formatarMoeda(transacao.valor)}\n`;
+  mensagem += `🔄 *Tipo:* ${tipoEmoji} ${tipoTexto}\n`;
+  mensagem += `🏷️ *Categoria:* ${categoriaCapitalizada}\n`;
+  mensagem += `🏦 *Conta:* ${contaNome}\n`;
+  mensagem += `📅 *Data:* ${dataFormatada}\n\n`;
+  mensagem += `❌ *Para Excluir Diga:* "Excluir Transação ${identificador}"\n\n`;
+  mensagem += `📊 *Consulte Gráficos E Relatórios Completos Em:*\n`;
+  mensagem += `usezela.com/painel\n\n`;
+  mensagem += `━━━━━━━━━━━━━━━━━━━━\n`;
+  mensagem += `⚡ *Ações Rápidas*\n`;
+  mensagem += `• Ver Resumo Financeiro Do Mês\n`;
+  mensagem += `• Excluir Esta Transação`;
   
   return mensagem;
 }
@@ -46,21 +78,32 @@ export function formatarMensagemTransacao(transacao: DadosTransacao): string {
  * Formata mensagem para múltiplas transações
  */
 export function formatarMensagemMultiplasTransacoes(transacoes: DadosTransacao[]): string {
-  let mensagem = `✅ *${transacoes.length} transações registradas!*\n\n`;
+  let mensagem = `*${transacoes.length} Transações Registradas Com Sucesso!*\n\n`;
   
   transacoes.forEach((t, index) => {
-    const tipoEmoji = t.tipo === 'entrada' ? '💰' : '💸';
-    const metodoEmoji = t.metodo === 'credito' ? '💳' : '💵';
+    const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
+    const tipoTexto = t.tipo === 'entrada' ? 'Receita' : 'Despesa';
+    const categoriaCapitalizada = capitalizar(t.categoria);
+    const contaNome = t.carteiraNome || '—';
+    const identificador = t.id ? gerarIdentificador(t.id) : 'N/A';
     
-    mensagem += `${index + 1}. ${tipoEmoji} ${t.descricao}\n`;
-    mensagem += `   ${formatarMoeda(t.valor)} | ${t.categoria} | ${metodoEmoji} ${t.metodo === 'credito' ? 'Crédito' : 'Débito'}\n`;
+    const dataFormatada = t.data 
+      ? new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR')
+      : new Date().toLocaleDateString('pt-BR');
     
-    if (t.carteiraNome) {
-      mensagem += `   💳 ${t.carteiraNome}\n`;
-    }
-    
-    mensagem += `\n`;
+    mensagem += `*Transação ${index + 1}*\n`;
+    mensagem += `━━━━━━━━━━━━━━━━━━━━\n`;
+    mensagem += `📄 *Descrição:* ${t.descricao}\n`;
+    mensagem += `💰 *Valor:* ${formatarMoeda(t.valor)}\n`;
+    mensagem += `🔄 *Tipo:* ${tipoEmoji} ${tipoTexto}\n`;
+    mensagem += `🏷️ *Categoria:* ${categoriaCapitalizada}\n`;
+    mensagem += `🏦 *Conta:* ${contaNome}\n`;
+    mensagem += `📅 *Data:* ${dataFormatada}\n`;
+    mensagem += `🆔 *Identificador:* ${identificador}\n\n`;
   });
+  
+  mensagem += `📊 *Consulte Gráficos E Relatórios Completos Em:*\n`;
+  mensagem += `usezela.com/painel`;
   
   return mensagem;
 }
