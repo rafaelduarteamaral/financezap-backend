@@ -26,6 +26,25 @@ export async function salvarTransacao(transacao: Transacao): Promise<number> {
   try {
     const dataApenas = transacao.data || (transacao.dataHora ? transacao.dataHora.split(' ')[0] : new Date().toISOString().split('T')[0]);
     
+    // Importa validações
+    const { validarTransacaoCompleta } = await import('./validacoesFinanceiras');
+    
+    // Valida todas as regras financeiras ANTES de salvar
+    const validacao = await validarTransacaoCompleta({
+      valor: transacao.valor,
+      tipo: (transacao.tipo || 'saida') as 'entrada' | 'saida',
+      metodo: (transacao.metodo || 'debito') as 'credito' | 'debito',
+      descricao: transacao.descricao,
+      data: dataApenas,
+      carteiraId: transacao.carteiraId || null,
+      telefone: transacao.telefone,
+      permitirDataFutura: false, // Transações normais não podem ter data futura
+    });
+    
+    if (!validacao.valido) {
+      throw new Error(validacao.erro || 'Validação falhou');
+    }
+    
     // Garante que a transação tenha uma carteira
     let carteiraIdFinal = transacao.carteiraId;
     
@@ -1463,11 +1482,32 @@ export async function obterEstatisticasCredito(filtros?: {
     if (filtros?.carteirasIds && filtros.carteirasIds.length > 0) {
       const carteiras = await prisma.carteira.findMany({
         where: { id: { in: filtros.carteirasIds }, tipo: 'credito' },
-        select: { limiteCredito: true },
+        select: { id: true, limiteCredito: true, diaPagamento: true },
       });
       
       const limiteTotal = carteiras.reduce((sum, c) => sum + (c.limiteCredito || 0), 0);
-      limiteUtilizado = totalGasto;
+      
+      // CORREÇÃO: Calcula apenas saídas de CRÉDITO no período da fatura, não todas as saídas
+      const { calcularLimiteUtilizadoCredito } = await import('./validacoesFinanceiras');
+      
+      // Calcula limite utilizado para cada carteira de crédito
+      let totalLimiteUtilizado = 0;
+      for (const carteira of carteiras) {
+        if (carteira.limiteCredito && carteira.limiteCredito > 0) {
+          // Busca telefone do filtro ou usa o primeiro telefone encontrado
+          const telefoneParaCalculo = filtros.telefone || '';
+          if (telefoneParaCalculo) {
+            const utilizado = await calcularLimiteUtilizadoCredito(
+              telefoneParaCalculo,
+              carteira.id,
+              carteira.diaPagamento
+            );
+            totalLimiteUtilizado += utilizado;
+          }
+        }
+      }
+      
+      limiteUtilizado = totalLimiteUtilizado;
       limiteDisponivel = limiteTotal - limiteUtilizado;
     }
 

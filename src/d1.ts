@@ -291,7 +291,10 @@ export async function salvarTransacao(
   const telefoneNormalizado = normalizarTelefone(transacao.telefone);
   console.log('💾 D1: Salvando transação com telefone normalizado:', telefoneNormalizado);
 
-  // Busca ou cria carteira se não foi fornecida
+  // Importa validações
+  const { validarTransacaoCompletaD1 } = await import('./validacoesFinanceiras');
+
+  // Busca ou cria carteira se não foi fornecida (precisa para validação)
   let carteiraId = transacao.carteiraId;
   if (!carteiraId) {
     const tipoCarteira = (transacao.metodo || 'debito') as 'debito' | 'credito';
@@ -303,6 +306,22 @@ export async function salvarTransacao(
       console.error('⚠️ D1: Erro ao buscar/criar carteira, salvando sem carteiraId:', error.message);
       carteiraId = null;
     }
+  }
+
+  // Valida todas as regras financeiras ANTES de salvar
+  const validacao = await validarTransacaoCompletaD1(db, {
+    valor: transacao.valor,
+    tipo: (transacao.tipo || 'saida') as 'entrada' | 'saida',
+    metodo: (transacao.metodo || 'debito') as 'credito' | 'debito',
+    descricao: transacao.descricao,
+    data: data,
+    carteiraId: carteiraId,
+    telefone: telefoneNormalizado,
+    permitirDataFutura: false, // Transações normais não podem ter data futura
+  });
+
+  if (!validacao.valido) {
+    throw new Error(validacao.erro || 'Validação falhou');
   }
 
   const result = await db
