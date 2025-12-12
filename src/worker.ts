@@ -2808,10 +2808,66 @@ app.put('/api/agendamentos/:id', async (c) => {
       if (!['pendente', 'pago', 'cancelado'].includes(status)) {
         return c.json({ success: false, error: 'Status inválido' }, 400);
       }
-      const atualizado = await atualizarStatusAgendamentoD1(c.env.financezap_db, id, status);
-      if (!atualizado) {
+      
+      // Busca o agendamento antes de atualizar para criar a transação se necessário
+      const agendamento = await buscarAgendamentoPorIdD1(c.env.financezap_db, id);
+      if (!agendamento) {
         return c.json({ success: false, error: 'Agendamento não encontrado' }, 404);
       }
+      
+      // Verifica se o telefone corresponde
+      if (!telefonesCorrespondem(agendamento.telefone, telefoneFormatado)) {
+        console.log('⚠️ Telefones não correspondem ao atualizar agendamento:');
+        console.log(`   Agendamento: ${agendamento.telefone}`);
+        console.log(`   Usuário: ${telefoneFormatado}`);
+        return c.json({ success: false, error: 'Você não tem permissão para atualizar este agendamento' }, 403);
+      }
+      
+      const atualizado = await atualizarStatusAgendamentoD1(c.env.financezap_db, id, status);
+      if (!atualizado) {
+        return c.json({ success: false, error: 'Erro ao atualizar agendamento' }, 500);
+      }
+      
+      // Se marcou como pago, cria transação automaticamente
+      if (status === 'pago') {
+        const dataAtual = new Date().toISOString().split('T')[0];
+        const valorTransacao = valorPago || agendamento.valor;
+        
+        // Determina método baseado na carteira se fornecida
+        let metodoTransacao = 'debito';
+        if (carteiraId) {
+          try {
+            const { buscarCarteiraPorIdD1 } = await import('./d1');
+            const carteira = await buscarCarteiraPorIdD1(c.env.financezap_db, carteiraId, telefoneFormatado);
+            if (carteira && carteira.tipo === 'credito') {
+              metodoTransacao = 'credito';
+            }
+          } catch (error) {
+            console.error('Erro ao buscar carteira:', error);
+            // Mantém débito como padrão
+          }
+        }
+        
+        try {
+          const transacaoId = await salvarTransacao(c.env.financezap_db, {
+            telefone: telefoneFormatado,
+            descricao: agendamento.descricao,
+            valor: valorTransacao,
+            categoria: agendamento.categoria || 'outros',
+            tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
+            metodo: metodoTransacao,
+            dataHora: new Date().toISOString(),
+            data: dataAtual,
+            mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
+            carteiraId: carteiraId || null,
+          });
+          console.log(`✅ Transação criada automaticamente para agendamento ${id} (ID: ${transacaoId})`);
+        } catch (error: any) {
+          console.error(`❌ Erro ao criar transação para agendamento ${id}:`, error.message);
+          // Não falha a atualização do agendamento se a transação falhar
+        }
+      }
+      
       return c.json({ success: true, message: 'Status atualizado com sucesso' });
     } else {
       // Atualização completa
@@ -2844,69 +2900,54 @@ app.put('/api/agendamentos/:id', async (c) => {
         dadosAtualizacao.status = status;
       }
       
-      const atualizado = await atualizarAgendamentoD1(c.env.financezap_db, id, dadosAtualizacao);
-      if (!atualizado) {
-        return c.json({ success: false, error: 'Agendamento não encontrado' }, 404);
+      // Busca o agendamento atualizado para criar a transação se necessário
+      const agendamentoAtualizado = await buscarAgendamentoPorIdD1(c.env.financezap_db, id);
+      if (!agendamentoAtualizado) {
+        return c.json({ success: false, error: 'Agendamento não encontrado após atualização' }, 404);
       }
-      return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
-    }
-    
-    const agendamento = await buscarAgendamentoPorIdD1(c.env.financezap_db, id);
-    if (!agendamento) {
-      return c.json({ success: false, error: 'Agendamento não encontrado' }, 404);
-    }
-    
-    // Verifica se o telefone corresponde (usando função auxiliar)
-    if (!telefonesCorrespondem(agendamento.telefone, telefoneFormatado)) {
-      console.log('⚠️ Telefones não correspondem ao atualizar agendamento:');
-      console.log(`   Agendamento: ${agendamento.telefone}`);
-      console.log(`   Usuário: ${telefoneFormatado}`);
-      return c.json({ success: false, error: 'Você não tem permissão para atualizar este agendamento' }, 403);
-    }
-    
-    await atualizarStatusAgendamentoD1(c.env.financezap_db, id, status);
-    
-    // Se marcou como pago, cria transação automaticamente
-    // Se carteiraId e valorPago foram fornecidos, usa esses valores (vem do frontend)
-    // Caso contrário, usa valores padrão (compatibilidade com WhatsApp)
-    if (status === 'pago') {
-      const dataAtual = new Date().toISOString().split('T')[0];
-      const valorTransacao = valorPago || agendamento.valor;
       
-      // Determina método baseado na carteira se fornecida
-      let metodoTransacao = 'debito';
-      if (carteiraId) {
-        try {
-          const { buscarCarteiraPorIdD1 } = await import('./d1');
-          const carteira = await buscarCarteiraPorIdD1(c.env.financezap_db, carteiraId, telefoneFormatado);
-          if (carteira && carteira.tipo === 'credito') {
-            metodoTransacao = 'credito';
+      // Se marcou como pago na atualização completa, cria transação automaticamente
+      if (status === 'pago') {
+        const dataAtual = new Date().toISOString().split('T')[0];
+        const valorTransacao = valorPago || agendamentoAtualizado.valor;
+        
+        // Determina método baseado na carteira se fornecida
+        let metodoTransacao = 'debito';
+        if (carteiraId) {
+          try {
+            const { buscarCarteiraPorIdD1 } = await import('./d1');
+            const carteira = await buscarCarteiraPorIdD1(c.env.financezap_db, carteiraId, telefoneFormatado);
+            if (carteira && carteira.tipo === 'credito') {
+              metodoTransacao = 'credito';
+            }
+          } catch (error) {
+            console.error('Erro ao buscar carteira:', error);
+            // Mantém débito como padrão
           }
-        } catch (error) {
-          console.error('Erro ao buscar carteira:', error);
-          // Mantém débito como padrão
+        }
+        
+        try {
+          const transacaoId = await salvarTransacao(c.env.financezap_db, {
+            telefone: telefoneFormatado,
+            descricao: agendamentoAtualizado.descricao,
+            valor: valorTransacao,
+            categoria: agendamentoAtualizado.categoria || 'outros',
+            tipo: agendamentoAtualizado.tipo === 'recebimento' ? 'entrada' : 'saida',
+            metodo: metodoTransacao,
+            dataHora: new Date().toISOString(),
+            data: dataAtual,
+            mensagemOriginal: `Agendamento ${agendamentoAtualizado.id} - ${agendamentoAtualizado.descricao}`,
+            carteiraId: carteiraId || null,
+          });
+          console.log(`✅ Transação criada automaticamente para agendamento ${id} (ID: ${transacaoId})`);
+        } catch (error: any) {
+          console.error(`❌ Erro ao criar transação para agendamento ${id}:`, error.message);
+          // Não falha a atualização do agendamento se a transação falhar
         }
       }
       
-      const transacaoId = await salvarTransacao(c.env.financezap_db, {
-        telefone: telefoneFormatado,
-        descricao: agendamento.descricao,
-        valor: valorTransacao,
-        categoria: agendamento.categoria || 'outros',
-        tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
-        metodo: metodoTransacao,
-        dataHora: new Date().toISOString(),
-        data: dataAtual,
-        mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
-        carteiraId: carteiraId || null,
-      });
-      
-      // SSE desabilitado - usando apenas botão de atualizar manual
-      // notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
-      //   id: transacaoId,
-      //   tipo: 'transacao',
-      //   mensagem: 'Nova transação registrada'
-      // }, c.env.financezap_db);
+      return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
+    }
     }
     
     return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });

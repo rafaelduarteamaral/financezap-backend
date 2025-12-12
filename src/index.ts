@@ -4306,7 +4306,51 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
           error: 'Status inválido. Use: pendente, pago ou cancelado'
         });
       }
+      
+      // Atualiza o status
       await atualizarStatusAgendamento(parseInt(id), status);
+      
+      // Se marcou como pago, cria transação automaticamente
+      if (status === 'pago') {
+        const dataAtual = new Date().toISOString().split('T')[0];
+        const valorTransacao = valorPago || agendamento.valor;
+        
+        // Determina método baseado na carteira se fornecida
+        let metodoTransacao = 'debito';
+        if (carteiraId) {
+          try {
+            const { buscarCarteiraPorId } = await import('./carteiras');
+            const carteira = await buscarCarteiraPorId(carteiraId, telefone);
+            if (carteira && carteira.tipo === 'credito') {
+              metodoTransacao = 'credito';
+            }
+          } catch (error) {
+            console.error('Erro ao buscar carteira:', error);
+            // Mantém débito como padrão
+          }
+        }
+        
+        try {
+          const transacao: Transacao = {
+            telefone: telefone,
+            descricao: agendamento.descricao,
+            valor: valorTransacao,
+            categoria: agendamento.categoria || 'outros',
+            tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
+            metodo: metodoTransacao,
+            dataHora: new Date().toLocaleString('pt-BR'),
+            data: dataAtual,
+            mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
+            carteiraId: carteiraId || null,
+          };
+          
+          const transacaoId = await salvarTransacao(transacao);
+          console.log(`✅ Transação criada automaticamente para agendamento ${id} (ID: ${transacaoId})`);
+        } catch (error: any) {
+          console.error(`❌ Erro ao criar transação para agendamento ${id}:`, error.message);
+          // Não falha a atualização do agendamento se a transação falhar
+        }
+      }
     } else {
       // Atualização completa
       const dadosAtualizacao: any = {};
@@ -4351,44 +4395,48 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
       }
       
       await atualizarAgendamento(parseInt(id), dadosAtualizacao);
-    }
-
-    // Se marcou como pago, cria transação automaticamente
-    // Se carteiraId e valorPago foram fornecidos, usa esses valores (vem do frontend)
-    // Caso contrário, usa valores padrão (compatibilidade com WhatsApp)
-    if (status === 'pago') {
-      const dataAtual = new Date().toISOString().split('T')[0];
-      const valorTransacao = valorPago || agendamento.valor;
       
-      // Determina método baseado na carteira se fornecida
-      let metodoTransacao = 'debito';
-      if (carteiraId) {
-        try {
-          const { buscarCarteiraPorId } = await import('./carteiras');
-          const carteira = await buscarCarteiraPorId(carteiraId, telefone);
-          if (carteira && carteira.tipo === 'credito') {
-            metodoTransacao = 'credito';
+      // Se marcou como pago na atualização completa, cria transação automaticamente
+      if (status === 'pago') {
+        const dataAtual = new Date().toISOString().split('T')[0];
+        const valorTransacao = valorPago || agendamento.valor;
+        
+        // Determina método baseado na carteira se fornecida
+        let metodoTransacao = 'debito';
+        if (carteiraId) {
+          try {
+            const { buscarCarteiraPorId } = await import('./carteiras');
+            const carteira = await buscarCarteiraPorId(carteiraId, telefone);
+            if (carteira && carteira.tipo === 'credito') {
+              metodoTransacao = 'credito';
+            }
+          } catch (error) {
+            console.error('Erro ao buscar carteira:', error);
+            // Mantém débito como padrão
           }
-        } catch (error) {
-          console.error('Erro ao buscar carteira:', error);
-          // Mantém débito como padrão
+        }
+        
+        try {
+          const transacao: Transacao = {
+            telefone: telefone,
+            descricao: agendamento.descricao,
+            valor: valorTransacao,
+            categoria: agendamento.categoria || 'outros',
+            tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
+            metodo: metodoTransacao,
+            dataHora: new Date().toLocaleString('pt-BR'),
+            data: dataAtual,
+            mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
+            carteiraId: carteiraId || null,
+          };
+          
+          const transacaoId = await salvarTransacao(transacao);
+          console.log(`✅ Transação criada automaticamente para agendamento ${id} (ID: ${transacaoId})`);
+        } catch (error: any) {
+          console.error(`❌ Erro ao criar transação para agendamento ${id}:`, error.message);
+          // Não falha a atualização do agendamento se a transação falhar
         }
       }
-      
-      const transacao: Transacao = {
-        telefone: telefone,
-        descricao: agendamento.descricao,
-        valor: valorTransacao,
-        categoria: agendamento.categoria || 'outros',
-        tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
-        metodo: metodoTransacao,
-        dataHora: new Date().toLocaleString('pt-BR'),
-        data: dataAtual,
-        mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
-        carteiraId: carteiraId || null,
-      };
-
-      await salvarTransacao(transacao);
     }
 
     res.json({
