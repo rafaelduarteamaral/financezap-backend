@@ -2948,9 +2948,6 @@ app.put('/api/agendamentos/:id', async (c) => {
       
       return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
     }
-    }
-    
-    return c.json({ success: true, message: 'Agendamento atualizado com sucesso' });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
