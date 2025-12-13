@@ -3844,6 +3844,7 @@ app.post('/webhook/zapi', async (c) => {
       const mensagem = '📋 *Selecione A Transação Que Deseja Excluir:*\n\nEscolha uma opção da lista abaixo:';
       
       // Envia lista de opções via Z-API
+      // Nota: enviarListaOpcoesZApi não precisa de c.env, usa process.env diretamente
       const { enviarListaOpcoesZApi } = await import('./zapi');
       const resultado = await enviarListaOpcoesZApi(
         telefoneFormatado,
