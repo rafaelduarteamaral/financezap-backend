@@ -3813,9 +3813,12 @@ app.post('/webhook/zapi', async (c) => {
       
       // Busca transações recentes do usuário (últimas 10)
       const { buscarTransacoes } = await import('./d1');
-      const transacoesRecentes = await buscarTransacoes(c.env.financezap_db, cleanFromNumber, 10);
+      const resultadoTransacoes = await buscarTransacoes(c.env.financezap_db, {
+        telefone: cleanFromNumber,
+        limit: 10
+      });
       
-      if (transacoesRecentes.length === 0) {
+      if (resultadoTransacoes.transacoes.length === 0) {
         const resposta = '❌ Você não tem transações para excluir.';
         await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
         await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
@@ -3826,7 +3829,7 @@ app.post('/webhook/zapi', async (c) => {
       // Prepara lista de opções
       const { gerarIdentificadorTransacao } = await import('./formatadorTransacoes');
       const { formatarMoeda } = await import('./formatadorMensagens');
-      const opcoes = transacoesRecentes.map((t, index) => {
+      const opcoes = resultadoTransacoes.transacoes.map((t, index) => {
         const identificador = gerarIdentificadorTransacao(t.id);
         const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
         const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
@@ -3853,7 +3856,7 @@ app.post('/webhook/zapi', async (c) => {
       if (!resultado.success) {
         // Fallback: envia como mensagem normal com lista numerada
         let mensagemFallback = mensagem + '\n\n';
-        transacoesRecentes.forEach((t, index) => {
+        resultadoTransacoes.transacoes.forEach((t, index) => {
           const identificador = gerarIdentificadorTransacao(t.id);
           const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
           const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
