@@ -78,7 +78,12 @@ import {
 import {
   buscarCarteirasPorTelefone,
   buscarCarteiraPorId,
+  buscarCarteiraPadrao,
+  criarCarteira,
   buscarOuCriarCarteiraPorTipo,
+  atualizarCarteira,
+  removerCarteira,
+  definirCarteiraPadrao,
 } from './carteiras';
 import {
   inicializarCategoriasPadrao,
@@ -87,16 +92,6 @@ import {
   atualizarCategoria,
   removerCategoria,
 } from './categorias';
-import {
-  buscarCarteirasPorTelefone,
-  buscarCarteiraPorId,
-  buscarCarteiraPadrao,
-  criarCarteira,
-  buscarOuCriarCarteiraPorTipo,
-  atualizarCarteira,
-  removerCarteira,
-  definirCarteiraPadrao,
-} from './carteiras';
 import {
   sanitizarEntrada,
   validarPermissaoDados,
@@ -634,7 +629,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 });
 
 // Rota para receber webhooks da Z-API
-app.post('/webhook/zapi', express.json(), async (req, res) => {
+app.post('/webhook/zapi', express.json(), async (req: express.Request, res: express.Response) => {
   console.log('\n' + '='.repeat(60));
   console.log('🔔 WEBHOOK RECEBIDO DA Z-API!');
   console.log('='.repeat(60));
@@ -1407,8 +1402,8 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
           }
         }
         
-        // Se não foi agendamento nem confirmação, processa como transação normal
-        // MELHORIA: Só processa se intenção for transação ou desconhecida (pode ser transação)
+        // Se não foi agendamento nem confirmação, processa como transação normal ou pergunta
+        // MELHORIA: Só processa transação se intenção for transação ou desconhecida (pode ser transação)
         if (intencao.intencao === 'transacao' || intencao.intencao === 'desconhecida') {
           const transacoesExtraidas = await processarMensagemComIA(messageText);
           
@@ -1584,10 +1579,12 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               success: true, 
               message: 'Transações salvas com sucesso' 
             });
-          } else {
-            // MELHORIA: Se não encontrou transação, verifica se é pergunta
-            if (intencao.intencao === 'pergunta') {
-              console.log('❓ Pergunta detectada, usando chat de IA...');
+          }
+        }
+        
+        // MELHORIA: Se não foi transação ou não encontrou transação, verifica se é pergunta
+        if (intencao.intencao === 'pergunta') {
+          console.log('❓ Pergunta detectada, usando chat de IA...');
               
               // Busca estatísticas e transações para contexto
               const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
@@ -1670,7 +1667,10 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
               }
             }
           }
-        } else if (intencao.intencao === 'pergunta') {
+        }
+        
+        // MELHORIA: Se não foi transação, verifica se é pergunta
+        if (intencao.intencao === 'pergunta') {
           // MELHORIA: Processa perguntas com contexto
           console.log('❓ Pergunta detectada, usando chat de IA...');
           
@@ -1746,20 +1746,6 @@ app.post('/webhook/zapi', express.json(), async (req, res) => {
         }
       }
     }
-    
-    // Notifica clientes conectados
-    notificarClientes(mensagem);
-    
-    // Exibe no console.log
-    console.log('='.repeat(50));
-    console.log('📱 Nova mensagem recebida (Z-API)!');
-    console.log('='.repeat(50));
-    console.log(`📞 Número de telefone: ${cleanFromNumber}`);
-    console.log(`💬 Mensagem: ${messageText}`);
-    console.log(`🆔 Message ID: ${messageSid}`);
-    console.log(`⏰ Data/Hora: ${mensagem.dataHora}`);
-    console.log('='.repeat(50));
-    console.log('');
     
     // Responde à Z-API
     res.json({ 
@@ -4316,7 +4302,7 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
         const valorTransacao = valorPago || agendamento.valor;
         
         // Determina método baseado na carteira se fornecida
-        let metodoTransacao = 'debito';
+        let metodoTransacao: 'credito' | 'debito' = 'debito';
         if (carteiraId) {
           try {
             const { buscarCarteiraPorId } = await import('./carteiras');
@@ -4396,13 +4382,23 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
       
       await atualizarAgendamento(parseInt(id), dadosAtualizacao);
       
+      // Busca o agendamento atualizado para criar a transação se necessário
+      const { buscarAgendamentoPorId } = await import('./agendamentos');
+      const agendamentoAtualizado = await buscarAgendamentoPorId(parseInt(id));
+      if (!agendamentoAtualizado) {
+        return res.status(404).json({
+          success: false,
+          error: 'Agendamento não encontrado após atualização'
+        });
+      }
+      
       // Se marcou como pago na atualização completa, cria transação automaticamente
       if (status === 'pago') {
         const dataAtual = new Date().toISOString().split('T')[0];
-        const valorTransacao = valorPago || agendamento.valor;
+        const valorTransacao = valorPago || agendamentoAtualizado.valor;
         
         // Determina método baseado na carteira se fornecida
-        let metodoTransacao = 'debito';
+        let metodoTransacao: 'credito' | 'debito' = 'debito';
         if (carteiraId) {
           try {
             const { buscarCarteiraPorId } = await import('./carteiras');
@@ -4419,14 +4415,14 @@ app.put('/api/agendamentos/:id', autenticarMiddleware, validarPermissaoDados, as
         try {
           const transacao: Transacao = {
             telefone: telefone,
-            descricao: agendamento.descricao,
+            descricao: agendamentoAtualizado.descricao,
             valor: valorTransacao,
-            categoria: agendamento.categoria || 'outros',
-            tipo: agendamento.tipo === 'recebimento' ? 'entrada' : 'saida',
+            categoria: agendamentoAtualizado.categoria || 'outros',
+            tipo: agendamentoAtualizado.tipo === 'recebimento' ? 'entrada' : 'saida',
             metodo: metodoTransacao,
             dataHora: new Date().toLocaleString('pt-BR'),
             data: dataAtual,
-            mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
+            mensagemOriginal: `Agendamento ${agendamentoAtualizado.id} - ${agendamentoAtualizado.descricao}`,
             carteiraId: carteiraId || null,
           };
           
