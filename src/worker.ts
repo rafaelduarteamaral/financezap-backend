@@ -3807,6 +3807,69 @@ app.post('/webhook/zapi', async (c) => {
       });
     }
     
+    // MELHORIA: Processa pedido de exclusão de transação
+    if (intencao.intencao === 'exclusao') {
+      console.log('🗑️ Solicitação de exclusão detectada!');
+      
+      // Busca transações recentes do usuário (últimas 10)
+      const { buscarTransacoes } = await import('./d1');
+      const transacoesRecentes = await buscarTransacoes(c.env.financezap_db, cleanFromNumber, 10);
+      
+      if (transacoesRecentes.length === 0) {
+        const resposta = '❌ Você não tem transações para excluir.';
+        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+        await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+        
+        return c.json({ success: true, message: 'Nenhuma transação encontrada' });
+      }
+      
+      // Prepara lista de opções
+      const { gerarIdentificadorTransacao } = await import('./formatadorTransacoes');
+      const { formatarMoeda } = await import('./formatadorMensagens');
+      const opcoes = transacoesRecentes.map((t, index) => {
+        const identificador = gerarIdentificadorTransacao(t.id);
+        const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
+        const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
+        
+        return {
+          titulo: `${tipoEmoji} ${t.descricao.substring(0, 20)}${t.descricao.length > 20 ? '...' : ''}`,
+          descricao: `${formatarMoeda(t.valor)} • ${dataFormatada} • ID: ${identificador}`,
+          id: `excluir_${t.id}` // ID da transação para processar exclusão
+        };
+      });
+      
+      const mensagem = '📋 *Selecione A Transação Que Deseja Excluir:*\n\nEscolha uma opção da lista abaixo:';
+      
+      // Envia lista de opções via Z-API
+      const { enviarListaOpcoesZApi } = await import('./zapi');
+      const resultado = await enviarListaOpcoesZApi(
+        telefoneFormatado,
+        mensagem,
+        'Excluir Transação',
+        'Ver Transações',
+        opcoes
+      );
+      
+      if (!resultado.success) {
+        // Fallback: envia como mensagem normal com lista numerada
+        let mensagemFallback = mensagem + '\n\n';
+        transacoesRecentes.forEach((t, index) => {
+          const identificador = gerarIdentificadorTransacao(t.id);
+          const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
+          const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
+          mensagemFallback += `${index + 1}. ${tipoEmoji} ${t.descricao} - ${formatarMoeda(t.valor)} (${dataFormatada})\n`;
+          mensagemFallback += `   ID: ${identificador}\n\n`;
+        });
+        mensagemFallback += '💡 Digite "Excluir Transação [ID]" para excluir.';
+        
+        await enviarMensagemZApi(telefoneFormatado, mensagemFallback, c.env);
+      }
+      
+      await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagem);
+      
+      return c.json({ success: true, message: 'Lista de transações enviada' });
+    }
+    
     // Se não foi agendamento, processa como transação usando IA
     console.log('💰 Processando como transação com IA...');
     
