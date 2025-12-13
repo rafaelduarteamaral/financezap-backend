@@ -13,6 +13,7 @@ export type IntencaoUsuario =
   | 'resumo'
   | 'saldo'
   | 'listagem'
+  | 'exclusao'
   | 'desconhecida';
 
 export interface ResultadoDeteccao {
@@ -133,13 +134,28 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     };
   }
 
-  // 7. Verifica se é correção
+  // 7. Verifica se é exclusão
+  const palavrasExclusao = [
+    'excluir',
+    'deletar',
+    'remover',
+    'apagar',
+    'excluir transação',
+    'deletar transação',
+    'remover transação',
+    'apagar transação',
+  ];
+  if (palavrasExclusao.some(palavra => mensagemLower.includes(palavra))) {
+    return { intencao: 'exclusao', confianca: 0.85 };
+  }
+
+  // 8. Verifica se é correção
   const palavrasCorrecao = ['corrigir', 'correção', 'correcao', 'alterar', 'mudar', 'editar'];
   if (palavrasCorrecao.some(palavra => mensagemLower.includes(palavra))) {
     return { intencao: 'correcao', confianca: 0.75 };
   }
 
-  // 8. Verifica se é transação (entrada ou saída)
+  // 9. Verifica se é transação (entrada ou saída)
   const palavrasEntrada = [
     'recebi',
     'recebido',
@@ -186,7 +202,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     };
   }
 
-  // 9. Verifica se é pergunta (contém interrogação ou palavras de pergunta)
+  // 10. Verifica se é pergunta (contém interrogação ou palavras de pergunta)
   const palavrasPergunta = [
     'quanto',
     'qual',
@@ -207,7 +223,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     return { intencao: 'pergunta', confianca: 0.7 };
   }
 
-  // 11. Se tem valor mas não tem contexto claro, pode ser transação
+  // 12. Se tem valor mas não tem contexto claro, pode ser transação
   if (temValor) {
     return {
       intencao: 'transacao',
@@ -216,7 +232,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     };
   }
 
-  // 12. Desconhecida
+  // 13. Desconhecida
   return { intencao: 'desconhecida', confianca: 0.3 };
 }
 

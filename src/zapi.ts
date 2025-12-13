@@ -343,6 +343,130 @@ export async function enviarMensagemComBotoesZApi(
 }
 
 /**
+ * Envia lista de opções (option list) via Z-API
+ */
+export async function enviarListaOpcoesZApi(
+  telefone: string,
+  mensagem: string,
+  titulo: string,
+  rotuloBotao: string,
+  opcoes: Array<{ titulo: string; descricao: string; id?: string }>
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  if (!zapiConfig) {
+    return {
+      success: false,
+      error: 'Z-API não configurada. Configure ZAPI_INSTANCE_ID e ZAPI_TOKEN no .env'
+    };
+  }
+
+  if (opcoes.length === 0) {
+    return {
+      success: false,
+      error: 'Lista de opções não pode estar vazia'
+    };
+  }
+
+  try {
+    // Remove prefixo whatsapp: se existir e formata o número
+    const numeroLimpo = telefone.replace('whatsapp:', '').replace('+', '');
+    
+    // Z-API espera o número no formato: 5561981474690 (sem + e sem whatsapp:)
+    const numeroFormatado = numeroLimpo.startsWith('55') 
+      ? numeroLimpo 
+      : `55${numeroLimpo}`;
+
+    // Z-API endpoint: /instances/{instance}/token/{token}/send-option-list
+    const url = `${zapiConfig.baseUrl}/instances/${zapiConfig.instanceId}/token/${zapiConfig.token}/send-option-list`;
+    
+    console.log(`📤 Enviando lista de opções via Z-API:`);
+    console.log(`   URL: ${url}`);
+    console.log(`   Telefone: ${numeroFormatado}`);
+    console.log(`   Mensagem: ${mensagem.substring(0, 50)}...`);
+    console.log(`   Título: ${titulo}`);
+    console.log(`   Opções: ${opcoes.length}`);
+    
+    // Formato da requisição conforme documentação Z-API
+    const requestBody = {
+      phone: numeroFormatado,
+      message: mensagem,
+      optionList: {
+        title: titulo,
+        buttonLabel: rotuloBotao,
+        options: opcoes.map((op, index) => ({
+          title: op.titulo,
+          description: op.descricao,
+          id: op.id || `opcao_${index}`
+        }))
+      }
+    };
+    
+    console.log(`   Request Body:`, JSON.stringify(requestBody, null, 2));
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Client-Token': zapiConfig.clientToken,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const responseText = await response.text();
+    console.log(`📥 Resposta da Z-API (lista de opções):`);
+    console.log(`   Status: ${response.status} ${response.statusText}`);
+    console.log(`   Response Body: ${responseText}`);
+
+    let data: any;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('❌ Erro ao parsear resposta JSON:', responseText);
+      return {
+        success: false,
+        error: `Resposta inválida da Z-API: ${responseText.substring(0, 100)}`
+      };
+    }
+
+    if (!response.ok || (data && (data.error || data.message === 'NOT_FOUND'))) {
+      console.error('❌ Erro Z-API ao enviar lista de opções:', data);
+      let mensagemErro = data?.message || data?.error || `Erro ${response.status}: ${response.statusText}`;
+      
+      // Se o endpoint não existe, tenta enviar como mensagem normal
+      if (data?.error === 'NOT_FOUND' || mensagemErro.includes('NOT_FOUND')) {
+        console.log('⚠️  Endpoint /send-option-list não encontrado. Enviando como mensagem normal...');
+        
+        // Formata a mensagem com as opções como texto
+        let mensagemComOpcoes = mensagem + '\n\n';
+        opcoes.forEach((op, index) => {
+          mensagemComOpcoes += `${index + 1}. ${op.titulo} - ${op.descricao}\n`;
+        });
+        
+        // Envia como mensagem normal
+        return await enviarMensagemZApi(telefone, mensagemComOpcoes);
+      }
+      
+      return {
+        success: false,
+        error: mensagemErro
+      };
+    }
+
+    console.log(`✅ Lista de opções enviada via Z-API para ${numeroFormatado}`);
+    return {
+      success: true,
+      messageId: data?.messageId || data?.id || 'unknown'
+    };
+  } catch (error: any) {
+    console.error('❌ Erro ao enviar lista de opções via Z-API:', error);
+    return {
+      success: false,
+      error: error.message || 'Erro ao enviar lista de opções via Z-API'
+    };
+  }
+}
+
+/**
  * Verifica se Z-API está configurada
  */
 export function zapiEstaConfigurada(): boolean {

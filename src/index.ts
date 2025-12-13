@@ -63,7 +63,7 @@ import {
 } from './database';
 import { gerarToken, verificarToken, autenticarMiddleware } from './auth';
 import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from './codigoVerificacao';
-import { enviarMensagemZApi, enviarMensagemComBotoesZApi, zapiEstaConfigurada, verificarStatusInstancia } from './zapi';
+import { enviarMensagemZApi, enviarMensagemComBotoesZApi, enviarListaOpcoesZApi, zapiEstaConfigurada, verificarStatusInstancia } from './zapi';
 import {
   criarAgendamento,
   criarAgendamentosRecorrentes,
@@ -642,6 +642,78 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
     // Formato: { text: { message: "..." }, phone: "...", participantPhone: "...", isGroup: true/false }
     const body = req.body;
     
+    // Verifica se é uma seleção de lista de opções
+    const selectedOptionId = body.selectedOptionId || body.optionList?.selectedOptionId || body.interactive?.list_reply?.id;
+    const selectedOptionTitle = body.selectedOptionTitle || body.optionList?.selectedOptionTitle || body.interactive?.list_reply?.title;
+    
+    if (selectedOptionId) {
+      console.log('📋 Opção selecionada da lista!');
+      console.log(`   Selected Option ID: ${selectedOptionId}`);
+      console.log(`   Selected Option Title: ${selectedOptionTitle}`);
+      
+      // Para grupos, usa participantPhone; para mensagens diretas, usa phone
+      const phoneNumber = body.isGroup ? body.participantPhone : body.phone;
+      
+      if (!phoneNumber) {
+        console.log('⚠️  Webhook da Z-API sem phone');
+        return res.status(400).json({ success: false, error: 'phone é obrigatório' });
+      }
+      
+      const fromNumber = phoneNumber.startsWith('55') ? `whatsapp:+${phoneNumber}` : `whatsapp:+55${phoneNumber}`;
+      const cleanFromNumber = fromNumber.replace('whatsapp:', '');
+      
+      // Processa exclusão de transação
+      if (selectedOptionId.startsWith('excluir_')) {
+        const transacaoId = parseInt(selectedOptionId.replace('excluir_', ''));
+        console.log(`🗑️ Processando exclusão da transação ${transacaoId}`);
+        
+        try {
+          // Verifica se a transação pertence ao usuário
+          const transacao = await buscarTransacaoPorId(transacaoId);
+          
+          if (!transacao) {
+            const resposta = '❌ Transação não encontrada.';
+            await enviarMensagemZApi(fromNumber, resposta);
+            return res.json({ success: false, message: 'Transação não encontrada' });
+          }
+          
+          // Verifica se o telefone corresponde
+          const telefoneTransacao = transacao.telefone.replace('whatsapp:', '').replace('+', '');
+          const telefoneUsuario = cleanFromNumber.replace('whatsapp:', '').replace('+', '');
+          
+          if (telefoneTransacao !== telefoneUsuario) {
+            const resposta = '❌ Você não tem permissão para excluir esta transação.';
+            await enviarMensagemZApi(fromNumber, resposta);
+            return res.json({ success: false, message: 'Permissão negada' });
+          }
+          
+          // Remove a transação
+          await removerTransacao(transacaoId);
+          
+          const { gerarIdentificadorTransacao } = await import('./formatadorTransacoes');
+          const identificador = gerarIdentificadorTransacao(transacaoId);
+          
+          const resposta = `✅ *Transação Excluída Com Sucesso!*\n\n` +
+            `🆔 Identificador: ${identificador}\n` +
+            `📄 Descrição: ${transacao.descricao}\n` +
+            `💰 Valor: ${formatarMoeda(transacao.valor)}\n\n` +
+            `A transação foi removida permanentemente.`;
+          
+          await enviarMensagemZApi(fromNumber, resposta);
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', resposta);
+          
+          return res.json({ success: true, message: 'Transação excluída com sucesso' });
+        } catch (error: any) {
+          console.error('❌ Erro ao processar exclusão via lista:', error);
+          const resposta = `❌ Erro ao excluir transação: ${error.message}`;
+          await enviarMensagemZApi(fromNumber, resposta);
+          return res.json({ success: false, message: 'Erro ao excluir transação' });
+        }
+      }
+      
+      return res.json({ success: true, message: 'Opção processada' });
+    }
+    
     // Verifica se é um clique em botão interativo
     const buttonId = body.buttonId || body.button?.id || body.interactive?.button_reply?.id;
     const buttonText = body.buttonText || body.button?.text || body.interactive?.button_reply?.title;
@@ -984,6 +1056,97 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
           }
           
           return res.json({ success: true, message: 'Ajuda enviada' });
+        }
+        
+        // MELHORIA: Processa pedido de exclusão de transação
+        if (intencao.intencao === 'exclusao') {
+          console.log('🗑️ Solicitação de exclusão detectada!');
+          
+          // Busca transações recentes do usuário (últimas 10)
+          const transacoesRecentes = await buscarTransacoesComFiltros({
+            telefone: cleanFromNumber,
+            limit: 10
+          });
+          
+          if (transacoesRecentes.transacoes.length === 0) {
+            const resposta = '❌ Você não tem transações para excluir.';
+            await adicionarMensagemContexto(cleanFromNumber, 'assistant', resposta);
+            
+            if (zapiEstaConfigurada()) {
+              await enviarMensagemZApi(fromNumber, resposta);
+            } else if (twilioWhatsAppNumber) {
+              await client.messages.create({
+                from: twilioWhatsAppNumber,
+                to: fromNumber,
+                body: resposta
+              });
+            }
+            
+            return res.json({ success: true, message: 'Nenhuma transação encontrada' });
+          }
+          
+          // Prepara lista de opções
+          const { gerarIdentificadorTransacao } = await import('./formatadorTransacoes');
+          const opcoes = transacoesRecentes.transacoes.map((t, index) => {
+            const identificador = gerarIdentificadorTransacao(t.id);
+            const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
+            const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
+            
+            return {
+              titulo: `${tipoEmoji} ${t.descricao.substring(0, 20)}${t.descricao.length > 20 ? '...' : ''}`,
+              descricao: `${formatarMoeda(t.valor)} • ${dataFormatada} • ID: ${identificador}`,
+              id: `excluir_${t.id}` // ID da transação para processar exclusão
+            };
+          });
+          
+          const mensagem = '📋 *Selecione A Transação Que Deseja Excluir:*\n\nEscolha uma opção da lista abaixo:';
+          
+          // Envia lista de opções via Z-API
+          if (zapiEstaConfigurada()) {
+            const resultado = await enviarListaOpcoesZApi(
+              fromNumber,
+              mensagem,
+              'Excluir Transação',
+              'Ver Transações',
+              opcoes
+            );
+            
+            if (!resultado.success) {
+              // Fallback: envia como mensagem normal com lista numerada
+              let mensagemFallback = mensagem + '\n\n';
+              transacoesRecentes.transacoes.forEach((t, index) => {
+                const identificador = gerarIdentificadorTransacao(t.id);
+                const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
+                const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
+                mensagemFallback += `${index + 1}. ${tipoEmoji} ${t.descricao} - ${formatarMoeda(t.valor)} (${dataFormatada})\n`;
+                mensagemFallback += `   ID: ${identificador}\n\n`;
+              });
+              mensagemFallback += '💡 Digite "Excluir Transação [ID]" para excluir.';
+              
+              await enviarMensagemZApi(fromNumber, mensagemFallback);
+            }
+          } else if (twilioWhatsAppNumber) {
+            // Twilio não suporta lista de opções, envia como mensagem normal
+            let mensagemTwilio = mensagem + '\n\n';
+            transacoesRecentes.transacoes.forEach((t, index) => {
+              const identificador = gerarIdentificadorTransacao(t.id);
+              const tipoEmoji = t.tipo === 'entrada' ? '💰' : '🔴';
+              const dataFormatada = new Date(t.data + 'T00:00:00').toLocaleDateString('pt-BR');
+              mensagemTwilio += `${index + 1}. ${tipoEmoji} ${t.descricao} - ${formatarMoeda(t.valor)} (${dataFormatada})\n`;
+              mensagemTwilio += `   ID: ${identificador}\n\n`;
+            });
+            mensagemTwilio += '💡 Digite "Excluir Transação [ID]" para excluir.';
+            
+            await client.messages.create({
+              from: twilioWhatsAppNumber,
+              to: fromNumber,
+              body: mensagemTwilio
+            });
+          }
+          
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagem);
+          
+          return res.json({ success: true, message: 'Lista de transações enviada' });
         }
         
         // MELHORIA: Processa pedido de saldo (saldo total e por carteira)

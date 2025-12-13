@@ -107,3 +107,21 @@ export function formatarMensagemMultiplasTransacoes(transacoes: DadosTransacao[]
   
   return mensagem;
 }
+
+/**
+ * Gera identificador a partir do ID (exportado para uso externo)
+ */
+export function gerarIdentificadorTransacao(id: number): string {
+  return gerarIdentificador(id);
+}
+
+/**
+ * Decodifica ID da transação a partir do identificador
+ * Nota: Esta função é uma aproximação, pois o identificador é gerado de forma não reversível
+ * Para uso real, devemos armazenar o mapeamento identificador -> ID ou usar o ID diretamente
+ */
+export function decodificarIdentificador(identificador: string): number | null {
+  // Como o identificador não é totalmente reversível, retornamos null
+  // A lógica de exclusão deve usar o ID diretamente ou buscar por identificador
+  return null;
+}
