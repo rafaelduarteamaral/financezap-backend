@@ -184,7 +184,7 @@ export function criarSugestaoProativa(estatisticas: any, transacoes: any[]): str
   const categoriaTop = Object.entries(categorias)
     .sort((a: any, b: any) => b[1] - a[1])[0];
 
-  if (categoriaTop && categoriaTop[1] > gastoMes * 0.4) {
+  if (categoriaTop && (categoriaTop[1] as number) > gastoMes * 0.4) {
     return `📊 *Insight:* Sua maior categoria é "${categoriaTop[0]}" (${formatarMoeda(categoriaTop[1] as number)}).\n` +
       `💡 Isso representa ${((categoriaTop[1] as number / gastoMes) * 100).toFixed(0)}% do seu gasto mensal.`;
   }

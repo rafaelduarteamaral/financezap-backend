@@ -90,7 +90,7 @@ export async function buscarCategorias(telefone: string): Promise<Categoria[]> {
       ],
     });
 
-    return categorias.map(cat => ({
+    return categorias.map((cat: any) => ({
       id: cat.id,
       telefone: cat.telefone || null,
       nome: cat.nome,

@@ -18,6 +18,8 @@ export interface AgendamentoExtraido {
   dataAgendamento: string; // YYYY-MM-DD
   tipo: 'pagamento' | 'recebimento';
   categoria?: string;
+  recorrente?: boolean;
+  totalParcelas?: number;
   sucesso: boolean;
 }
 
@@ -87,7 +89,9 @@ Retorne APENAS um JSON válido com o seguinte formato:
   "valor": 500.00,
   "dataAgendamento": "2025-12-15",
   "tipo": "pagamento",
-  "categoria": "contas"
+  "categoria": "contas",
+  "recorrente": false,
+  "totalParcelas": null
 }
 
 Regras:
@@ -99,6 +103,10 @@ Regras:
 - O valor deve ser um número (sem R$ ou "reais")
 - A descrição deve ser clara e objetiva
 - Categorias comuns: contas, boleto, salário, serviços, outros
+- IMPORTANTE: Se a mensagem menciona "parcelas", "parcela", "vezes", "x" (ex: "8 parcelas", "em 8x", "8 vezes"):
+  - "recorrente" deve ser true
+  - "totalParcelas" deve ser o número de parcelas mencionado
+  - Exemplo: "boleto em 8 parcelas" -> {"recorrente": true, "totalParcelas": 8}
 
 Se não houver informações suficientes para criar um agendamento, retorne null.
 Retorne APENAS o JSON, sem texto adicional.`;
@@ -162,6 +170,8 @@ Retorne APENAS o JSON, sem texto adicional.`;
       dataAgendamento: dataNormalizada,
       tipo: (resultado.tipo === 'recebimento' ? 'recebimento' : 'pagamento') as 'pagamento' | 'recebimento',
       categoria: resultado.categoria || 'outros',
+      recorrente: resultado.recorrente === true || (resultado.totalParcelas && resultado.totalParcelas > 1),
+      totalParcelas: resultado.totalParcelas && resultado.totalParcelas > 1 ? Number(resultado.totalParcelas) : undefined,
       sucesso: true,
     };
   } catch (error: any) {
@@ -252,6 +262,8 @@ Exemplos:
       dataAgendamento: dataNormalizada,
       tipo: (resultado.tipo === 'recebimento' ? 'recebimento' : 'pagamento') as 'pagamento' | 'recebimento',
       categoria: resultado.categoria || 'outros',
+      recorrente: resultado.recorrente === true || (resultado.totalParcelas && resultado.totalParcelas > 1),
+      totalParcelas: resultado.totalParcelas && resultado.totalParcelas > 1 ? Number(resultado.totalParcelas) : undefined,
       sucesso: true,
     };
   } catch (error: any) {

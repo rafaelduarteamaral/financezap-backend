@@ -1803,90 +1803,33 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
                 
                 return res.json({ success: true, message: 'Erro ao processar pergunta' });
               }
-            } else {
-              console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
-              // MELHORIA: Mensagem mais útil quando não entende
-              const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
-                '💡 *Dicas:*\n' +
-                '• Para registrar gasto: "comprei café por 5 reais"\n' +
-                '• Para registrar receita: "recebi 500 reais"\n' +
-                '• Para ver resumo: "resumo financeiro"\n' +
-                '• Para ajuda: "ajuda" ou "/ajuda"';
-              
-              await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
-              
-              if (zapiEstaConfigurada()) {
-                await enviarMensagemZApi(fromNumber, mensagemAmigavel);
-              } else if (twilioWhatsAppNumber) {
-                try {
-                  await client.messages.create({
-                    from: twilioWhatsAppNumber,
-                    to: fromNumber,
-                    body: mensagemAmigavel
-                  });
-                } catch (error: any) {
-                  console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
-                }
-              }
-            }
-          }
         }
         
-        // MELHORIA: Se não foi transação, verifica se é pergunta
-        if (intencao.intencao === 'pergunta') {
-          // MELHORIA: Processa perguntas com contexto
-          console.log('❓ Pergunta detectada, usando chat de IA...');
+        // Se não foi transação nem pergunta, envia mensagem de ajuda
+        if (intencao.intencao !== 'transacao' && intencao.intencao !== 'desconhecida') {
+          console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
+          // MELHORIA: Mensagem mais útil quando não entende
+          const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
+            '💡 *Dicas:*\n' +
+            '• Para registrar gasto: "comprei café por 5 reais"\n' +
+            '• Para registrar receita: "recebi 500 reais"\n' +
+            '• Para ver resumo: "resumo financeiro"\n' +
+            '• Para ajuda: "ajuda" ou "/ajuda"';
           
-          const estatisticas = await obterEstatisticas({ telefone: cleanFromNumber });
-          const transacoesRecentes = await buscarTransacoesComFiltros({
-            telefone: cleanFromNumber,
-            limit: 10
-          });
+          await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
           
-          const historicoTexto = formatarHistoricoParaPrompt(contexto);
-          
-          try {
-            const respostaIA = await processarChatFinanceiro(
-              messageText,
-              estatisticas,
-              transacoesRecentes.transacoes,
-              historicoTexto
-            );
-            
-            await adicionarMensagemContexto(cleanFromNumber, 'assistant', respostaIA);
-            
-            const mensagens = dividirMensagem(respostaIA);
-            
-            for (const msg of mensagens) {
-              if (zapiEstaConfigurada()) {
-                await enviarMensagemZApi(fromNumber, msg);
-              } else if (twilioWhatsAppNumber) {
-                await client.messages.create({
-                  from: twilioWhatsAppNumber,
-                  to: fromNumber,
-                  body: msg
-                });
-              }
-            }
-            
-            return res.json({ success: true, message: 'Pergunta respondida' });
-          } catch (error: any) {
-            console.error('❌ Erro no chat de IA:', error);
-            const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
-            
-            await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
-            
-            if (zapiEstaConfigurada()) {
-              await enviarMensagemZApi(fromNumber, mensagemAmigavel);
-            } else if (twilioWhatsAppNumber) {
+          if (zapiEstaConfigurada()) {
+            await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+          } else if (twilioWhatsAppNumber) {
+            try {
               await client.messages.create({
                 from: twilioWhatsAppNumber,
                 to: fromNumber,
                 body: mensagemAmigavel
               });
+            } catch (error: any) {
+              console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
             }
-            
-            return res.json({ success: true, message: 'Erro ao processar pergunta' });
           }
         }
       } catch (error: any) {
@@ -2022,16 +1965,16 @@ app.get('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (r
       distinct: ['telefone'],
     });
     console.log(`📊 Total de telefones únicos com transações: ${todasTransacoes.length}`);
-    console.log('📋 Telefones com transações:', todasTransacoes.map(t => t.telefone));
+    console.log('📋 Telefones com transações:', todasTransacoes.map((t: any) => t.telefone));
     
     const todosRegistrados = await prisma.numeroRegistrado.findMany({
       select: { telefone: true },
     });
     console.log(`📊 Total de telefones registrados: ${todosRegistrados.length}`);
-    console.log('📋 Telefones registrados:', todosRegistrados.map(t => t.telefone));
+    console.log('📋 Telefones registrados:', todosRegistrados.map((t: any) => t.telefone));
     
     // Verifica se o telefone do token existe nas transações
-    const telefoneExisteTransacoes = todasTransacoes.some(t => {
+    const telefoneExisteTransacoes = todasTransacoes.some((t: any) => {
       const tLimpo = t.telefone.replace(/\D/g, '');
       const telefoneLimpo = telefone.replace(/\D/g, '');
       return t.telefone === telefone || tLimpo === telefoneLimpo || 
@@ -2040,7 +1983,7 @@ app.get('/api/transacoes', autenticarMiddleware, validarPermissaoDados, async (r
     console.log(`✅ Telefone "${telefone}" existe nas transações? ${telefoneExisteTransacoes ? 'SIM' : 'NÃO'}`);
     
     // Verifica se o telefone do token existe nos registrados
-    const telefoneExisteRegistrados = todosRegistrados.some(t => {
+    const telefoneExisteRegistrados = todosRegistrados.some((t: any) => {
       const tLimpo = t.telefone.replace(/\D/g, '');
       const telefoneLimpo = telefone.replace(/\D/g, '');
       return t.telefone === telefone || tLimpo === telefoneLimpo || 
@@ -3161,7 +3104,7 @@ app.get('/api/templates', autenticarMiddleware, validarPermissaoDados, async (re
 
     res.json({
       success: true,
-      templates: templates.map(t => ({
+      templates: templates.map((t: any) => ({
         id: t.id,
         nome: t.nome,
         tipo: t.tipo,

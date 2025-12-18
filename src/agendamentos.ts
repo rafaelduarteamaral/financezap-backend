@@ -68,7 +68,7 @@ export async function criarAgendamentosRecorrentes(
   const primeiroId = await criarAgendamento({
     ...dados,
     parcelaAtual: 1,
-    agendamentoPaiId: null,
+    agendamentoPaiId: undefined,
     recorrente: true,
   });
   ids.push(primeiroId);

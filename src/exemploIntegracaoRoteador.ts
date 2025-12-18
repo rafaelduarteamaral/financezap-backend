@@ -8,7 +8,7 @@
  */
 
 import { processarMensagemComRoteamento, gerarMensagemResposta } from './roteadorServicos';
-import { chatIA } from './chatIA'; // Ajuste o import conforme seu arquivo
+// import { chatIA } from './chatIA'; // Ajuste o import conforme seu arquivo - função não existe mais
 
 /**
  * Exemplo de função para processar transação
@@ -102,7 +102,10 @@ export async function exemploProcessarMensagemWhatsApp(
     const { servicoUsado, resultado } = await processarMensagemComRoteamento(
       mensagem,
       telefone,
-      chatIA, // Sua função de chat com IA
+      async (mensagem: string) => {
+        // Implemente sua lógica de chat com IA aqui
+        return 'Resposta da IA';
+      },
       {
         transacao: processarTransacao,
         agendamento: processarAgendamento,

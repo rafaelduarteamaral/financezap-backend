@@ -309,7 +309,7 @@ export async function salvarTransacao(
   }
 
   // Valida todas as regras financeiras ANTES de salvar
-  const validacao = await validarTransacaoCompletaD1(db, {
+  const validacao = await validarTransacaoCompletaD1(db as any, {
     valor: transacao.valor,
     tipo: (transacao.tipo || 'saida') as 'entrada' | 'saida',
     metodo: (transacao.metodo || 'debito') as 'credito' | 'debito',
@@ -670,6 +670,7 @@ export async function buscarUsuarioPorTelefone(
   dataCadastro: string;
   trialExpiraEm: string;
   status: string;
+  plano: string | null;
   assinaturaEm: string | null;
   criadoEm: string;
   atualizadoEm: string;
@@ -689,6 +690,7 @@ export async function buscarUsuarioPorTelefone(
         dataCadastro: string;
         trialExpiraEm: string;
         status: string;
+        plano: string | null;
         assinaturaEm: string | null;
         criadoEm: string;
         atualizadoEm: string;

@@ -171,7 +171,7 @@ export async function buscarTransacoesPorTelefone(telefone: string): Promise<Tra
       }
     }
     
-    return transacoes.map(t => ({
+    return transacoes.map((t: any) => ({
       id: t.id,
       telefone: t.telefone,
       descricao: t.descricao,
@@ -367,7 +367,7 @@ export async function buscarTodasTransacoes(limit: number = 100): Promise<Transa
       },
     });
     
-    return transacoes.map(t => ({
+    return transacoes.map((t: any) => ({
       id: t.id,
       telefone: t.telefone,
       descricao: t.descricao,
@@ -425,8 +425,8 @@ export async function calcularTotalPorTelefone(telefone: string): Promise<number
     
     console.log(`   💰 Cálculo de saldo para ${telefoneLimpo}:`);
     console.log(`      Total de transações: ${transacoes.length}`);
-    console.log(`      Entradas: ${transacoes.filter(t => t.tipo === 'entrada').reduce((sum, t) => sum + t.valor, 0).toFixed(2)}`);
-    console.log(`      Saídas: ${transacoes.filter(t => t.tipo === 'saida').reduce((sum, t) => sum + t.valor, 0).toFixed(2)}`);
+    console.log(`      Entradas: ${transacoes.filter((t: any) => t.tipo === 'entrada').reduce((sum: number, t: any) => sum + t.valor, 0).toFixed(2)}`);
+    console.log(`      Saídas: ${transacoes.filter((t: any) => t.tipo === 'saida').reduce((sum: number, t: any) => sum + t.valor, 0).toFixed(2)}`);
     console.log(`      Saldo final: R$ ${saldo.toFixed(2)}`);
     
     return saldo;
@@ -512,7 +512,7 @@ export async function buscarTransacoesComFiltros(filtros: {
     
     // Adiciona filtro de telefone (busca flexível)
     if (telefoneConditions.length > 0) {
-      console.log(`   📞 Formatos de telefone que serão buscados:`, telefoneConditions.map(c => c.telefone));
+      console.log(`   📞 Formatos de telefone que serão buscados:`, telefoneConditions.map((c: any) => c.telefone));
       andConditions.push({ OR: telefoneConditions });
     }
     
@@ -609,8 +609,8 @@ export async function buscarTransacoesComFiltros(filtros: {
       
       // Combina ambos (sem duplicatas)
       const todosTelefones = [
-        ...todosTelefonesRegistrados.map(t => t.telefone),
-        ...todosTelefonesTransacoes.map(t => t.telefone)
+        ...todosTelefonesRegistrados.map((t: any) => t.telefone),
+        ...todosTelefonesTransacoes.map((t: any) => t.telefone)
       ].filter((v, i, a) => a.indexOf(v) === i); // Remove duplicatas
       
       console.log(`   📋 Telefones no banco: ${todosTelefones.join(', ')}`);
@@ -704,10 +704,10 @@ export async function buscarTransacoesComFiltros(filtros: {
     console.log(`✅ Transações retornadas do banco: ${transacoes.length}`);
     
     if (transacoes.length > 0) {
-      console.log(`   📋 Telefones das transações encontradas:`, transacoes.map(t => t.telefone).slice(0, 5));
+      console.log(`   📋 Telefones das transações encontradas:`, transacoes.map((t: any) => t.telefone).slice(0, 5));
       // Debug: verificar carteiras
-      const transacoesComCarteira = transacoes.filter(t => t.carteira).length;
-      const transacoesSemCarteira = transacoes.filter(t => !t.carteira).length;
+      const transacoesComCarteira = transacoes.filter((t: any) => t.carteira).length;
+      const transacoesSemCarteira = transacoes.filter((t: any) => !t.carteira).length;
       console.log(`   💳 Transações com carteira: ${transacoesComCarteira}, sem carteira: ${transacoesSemCarteira}`);
       if (transacoes[0].carteira) {
         console.log(`   💳 Exemplo de carteira:`, transacoes[0].carteira);
@@ -717,8 +717,8 @@ export async function buscarTransacoesComFiltros(filtros: {
     }
     
     // Remove duplicatas por ID (caso existam)
-    const transacoesUnicas = transacoes.filter((t, index, self) => 
-      index === self.findIndex((tr) => tr.id === t.id)
+    const transacoesUnicas = transacoes.filter((t: any, index: number, self: any[]) => 
+      index === self.findIndex((tr: any) => tr.id === t.id)
     );
     
     if (transacoesUnicas.length !== transacoes.length) {
@@ -726,7 +726,7 @@ export async function buscarTransacoesComFiltros(filtros: {
     }
     
     // Tenta associar carteiras para transações que não têm (em background, não bloqueia a resposta)
-    const transacoesSemCarteira = transacoesUnicas.filter(t => !t.carteiraId && !t.carteira);
+    const transacoesSemCarteira = transacoesUnicas.filter((t: any) => !t.carteiraId && !t.carteira);
     if (transacoesSemCarteira.length > 0) {
       console.log(`   🔄 ${transacoesSemCarteira.length} transações sem carteira detectadas. Tentando associar...`);
       // Executa em background para não bloquear a resposta
@@ -773,18 +773,18 @@ export async function buscarTransacoesComFiltros(filtros: {
 
     // Busca carteiras para transações sem carteira (em batch por telefone e tipo)
     const carteirasCache: { [key: string]: { id: number; nome: string; tipo: string } } = {};
-    const transacoesSemCarteiraParaBuscar = transacoesUnicas.filter(t => !t.carteira);
+    const transacoesSemCarteiraParaBuscar = transacoesUnicas.filter((t: any) => !t.carteira);
     
     if (transacoesSemCarteiraParaBuscar.length > 0) {
       console.log(`   🔄 Buscando carteiras para ${transacoesSemCarteiraParaBuscar.length} transações sem carteira...`);
       try {
         const { buscarOuCriarCarteiraPorTipo } = await import('./carteiras');
-        const telefonesUnicos = [...new Set(transacoesSemCarteiraParaBuscar.map(t => t.telefone))];
+        const telefonesUnicos = [...new Set(transacoesSemCarteiraParaBuscar.map((t: any) => t.telefone))];
         
         // Busca carteiras para cada combinação telefone+tipo (limita para não travar)
         for (const telefone of telefonesUnicos.slice(0, 5)) { // Limita a 5 telefones por vez
-          const transacoesDoTelefone = transacoesSemCarteiraParaBuscar.filter(t => t.telefone === telefone);
-          const tipos = [...new Set(transacoesDoTelefone.map(t => t.metodo || 'debito'))];
+          const transacoesDoTelefone = transacoesSemCarteiraParaBuscar.filter((t: any) => t.telefone === telefone);
+          const tipos = [...new Set(transacoesDoTelefone.map((t: any) => t.metodo || 'debito'))];
           
           for (const tipo of tipos) {
             const tipoCarteira = tipo as 'debito' | 'credito';
@@ -793,7 +793,7 @@ export async function buscarTransacoesComFiltros(filtros: {
             if (!carteirasCache[cacheKey]) {
               try {
                 console.log(`   🔍 Buscando carteira ${tipoCarteira} para telefone ${telefone}...`);
-                const carteira = await buscarOuCriarCarteiraPorTipo(telefone, tipoCarteira);
+                const carteira = await buscarOuCriarCarteiraPorTipo(telefone as string, tipoCarteira);
                 carteirasCache[cacheKey] = {
                   id: carteira.id,
                   nome: carteira.nome,
@@ -812,7 +812,7 @@ export async function buscarTransacoesComFiltros(filtros: {
     }
     
     // Mapeia todas as transações
-    const transacoesMapeadas = transacoesUnicas.map((t) => {
+    const transacoesMapeadas = transacoesUnicas.map((t: any) => {
       let carteiraData = t.carteira ? {
         id: t.carteira.id,
         nome: t.carteira.nome,
@@ -834,7 +834,7 @@ export async function buscarTransacoesComFiltros(filtros: {
           prisma.transacao.update({
             where: { id: t.id },
             data: { carteiraId: carteiraData.id },
-          }).catch(err => {
+          }).catch((err: any) => {
             console.error(`   ⚠️ Erro ao atualizar carteiraId da transação ${t.id}:`, err);
           });
         }
@@ -856,8 +856,8 @@ export async function buscarTransacoesComFiltros(filtros: {
     });
     
     // Debug: verifica quantas transações têm carteira após o mapeamento
-    const comCarteira = transacoesMapeadas.filter(t => t.carteira).length;
-    const semCarteira = transacoesMapeadas.filter(t => !t.carteira).length;
+    const comCarteira = transacoesMapeadas.filter((t: any) => t.carteira).length;
+    const semCarteira = transacoesMapeadas.filter((t: any) => !t.carteira).length;
     console.log(`   📊 Após mapeamento: ${comCarteira} com carteira, ${semCarteira} sem carteira`);
 
     return {
@@ -1485,7 +1485,7 @@ export async function obterEstatisticasCredito(filtros?: {
         select: { id: true, limiteCredito: true, diaPagamento: true },
       });
       
-      const limiteTotal = carteiras.reduce((sum, c) => sum + (c.limiteCredito || 0), 0);
+      const limiteTotal = carteiras.reduce((sum: number, c: any) => sum + (c.limiteCredito || 0), 0);
       
       // CORREÇÃO: Calcula apenas saídas de CRÉDITO no período da fatura, não todas as saídas
       const { calcularLimiteUtilizadoCredito } = await import('./validacoesFinanceiras');
@@ -1602,7 +1602,7 @@ export async function gastosPorDiaCredito(telefone?: string, dias: number = 30):
     // Agrupa por data
     const gastosPorData: { [key: string]: { entradas: number; saidas: number } } = {};
     
-    transacoes.forEach(transacao => {
+    transacoes.forEach((transacao: any) => {
       const data = transacao.data;
       if (!gastosPorData[data]) {
         gastosPorData[data] = { entradas: 0, saidas: 0 };
@@ -1734,8 +1734,8 @@ export async function gastosPorDia(telefone?: string, dias: number = 30): Promis
       
       // Combina ambos (sem duplicatas)
       const todosTelefones = [
-        ...todosTelefonesRegistrados.map(t => t.telefone),
-        ...todosTelefonesTransacoes.map(t => t.telefone)
+        ...todosTelefonesRegistrados.map((t: any) => t.telefone),
+        ...todosTelefonesTransacoes.map((t: any) => t.telefone)
       ].filter((v, i, a) => a.indexOf(v) === i); // Remove duplicatas
       
       console.log(`   📋 Telefones no banco: ${todosTelefones.join(', ')}`);
@@ -1800,7 +1800,7 @@ export async function gastosPorDia(telefone?: string, dias: number = 30): Promis
     // Agrupa por data separando entradas e saídas
     const dadosPorData: Record<string, { entradas: number; saidas: number }> = {};
     
-    transacoes.forEach((t) => {
+    transacoes.forEach((t: any) => {
       // Usa o campo data se existir, senão extrai da dataHora
       let dataStr: string;
       if (t.data) {
@@ -1959,7 +1959,7 @@ export async function listarTelefones(): Promise<Array<{ telefone: string; total
       orderBy: { _sum: { valor: 'desc' } },
     });
 
-    return resultado.map(r => ({
+    return resultado.map((r: any) => ({
       telefone: r.telefone,
       total: r._count.id,
       totalGasto: r._sum.valor || 0,

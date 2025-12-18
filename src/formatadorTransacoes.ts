@@ -111,8 +111,8 @@ export function formatarMensagemMultiplasTransacoes(transacoes: DadosTransacao[]
 /**
  * Gera identificador a partir do ID (exportado para uso externo)
  */
-export function gerarIdentificadorTransacao(id: number): string {
-  return gerarIdentificador(id);
+export function gerarIdentificadorTransacao(id: number | undefined): string {
+  return id ? gerarIdentificador(id) : 'N/A';
 }
 
 /**

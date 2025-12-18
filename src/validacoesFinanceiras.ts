@@ -271,7 +271,7 @@ export async function validarLimiteCredito(
     const limiteUtilizado = await calcularLimiteUtilizadoCredito(
       telefone,
       carteiraId,
-      carteira.diaPagamento
+      carteira.diaPagamento ?? null
     );
 
     // Verifica se a nova transação excede o limite

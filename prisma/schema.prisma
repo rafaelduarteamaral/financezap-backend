@@ -52,6 +52,7 @@ model Usuario {
   dataCadastro    DateTime  @default(now())
   trialExpiraEm   DateTime  // Data de expiração do trial (7 dias após cadastro)
   status          String    @default("trial") // "trial", "ativo", "expirado"
+  plano           String?   // "mensal", "trimestral", "anual" - null se ainda em trial
   assinaturaEm    DateTime? // Data da assinatura (quando assinar)
   templateAtivoId Int?      // ID do template ativo
   carteiraPadraoId Int?     // ID da carteira padrão

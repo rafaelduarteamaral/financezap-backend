@@ -1,9 +1,13 @@
 // Cálculo de saldos por carteira e total
-import { buscarTransacoesComFiltros } from './database';
-import { buscarCarteirasPorTelefone, type Carteira } from './carteiras';
+// NOTA: Este arquivo tem duas versões das funções:
+// - Versão Prisma (para desenvolvimento local)
+// - Versão D1 (para Cloudflare Workers)
+// O worker.ts deve usar apenas as funções D1
+
 import { buscarCarteirasD1 } from './d1';
 import type { D1Database } from '@cloudflare/workers-types';
 import { formatarMoeda } from './formatadorMensagens';
+import type { Carteira } from './carteiras';
 
 export interface SaldoCarteira {
   carteiraId: number;
@@ -23,12 +27,17 @@ export interface SaldoTotal {
 }
 
 /**
- * Calcula saldo por carteira (Prisma)
+ * Calcula saldo por carteira (Prisma) - APENAS PARA DESENVOLVIMENTO LOCAL
+ * NÃO USE NO CLOUDFLARE WORKERS
  */
 export async function calcularSaldoPorCarteira(
   telefone: string
 ): Promise<SaldoTotal> {
   try {
+    // Importação dinâmica para evitar erro no Cloudflare Workers
+    const { buscarCarteirasPorTelefone } = await import('./carteiras');
+    const { buscarTransacoesComFiltros } = await import('./database');
+    
     // Busca todas as carteiras do usuário
     const carteiras = await buscarCarteirasPorTelefone(telefone);
     

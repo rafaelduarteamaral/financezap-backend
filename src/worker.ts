@@ -764,7 +764,9 @@ Retorne APENAS um JSON válido com o seguinte formato:
   "valor": 500.00,
   "dataAgendamento": "2025-12-15",
   "tipo": "pagamento",
-  "categoria": "contas"
+  "categoria": "contas",
+  "recorrente": false,
+  "totalParcelas": null
 }
 
 Regras:
@@ -776,6 +778,10 @@ Regras:
 - O valor deve ser um número (sem R$ ou "reais")
 - A descrição deve ser clara e objetiva
 - Categorias comuns: contas, boleto, salário, serviços, outros
+- IMPORTANTE: Se a mensagem menciona "parcelas", "parcela", "vezes", "x" (ex: "8 parcelas", "em 8x", "8 vezes"):
+  - "recorrente" deve ser true
+  - "totalParcelas" deve ser o número de parcelas mencionado
+  - Exemplo: "boleto em 8 parcelas" -> {"recorrente": true, "totalParcelas": 8}
 
 Se não houver informações suficientes para criar um agendamento, retorne null.
 Retorne APENAS o JSON, sem texto adicional.`;
@@ -854,6 +860,8 @@ Retorne APENAS o JSON, sem texto adicional.`;
           dataAgendamento: dataNormalizada,
           tipo: (resultado.tipo === 'recebimento' ? 'recebimento' : 'pagamento') as 'pagamento' | 'recebimento',
           categoria: resultado.categoria || 'outros',
+          recorrente: resultado.recorrente === true || (resultado.totalParcelas && resultado.totalParcelas > 1),
+          totalParcelas: resultado.totalParcelas && resultado.totalParcelas > 1 ? Number(resultado.totalParcelas) : undefined,
           sucesso: true,
         };
       }
@@ -924,6 +932,8 @@ Retorne APENAS o JSON, sem texto adicional.`;
           dataAgendamento: dataNormalizada,
           tipo: (resultado.tipo === 'recebimento' ? 'recebimento' : 'pagamento') as 'pagamento' | 'recebimento',
           categoria: resultado.categoria || 'outros',
+          recorrente: resultado.recorrente === true || (resultado.totalParcelas && resultado.totalParcelas > 1),
+          totalParcelas: resultado.totalParcelas && resultado.totalParcelas > 1 ? Number(resultado.totalParcelas) : undefined,
           sucesso: true,
         };
       }
@@ -1836,6 +1846,7 @@ app.get('/api/auth/verify', async (c) => {
         nome: usuario.nome,
         email: usuario.email,
         status: usuario.status,
+        plano: usuario.plano || null, // 'mensal', 'trimestral', 'anual' ou null
         trialExpiraEm: usuario.trialExpiraEm,
         diasRestantesTrial: diasRestantes,
         totalTransacoes: stats.totalTransacoes,
@@ -1965,6 +1976,77 @@ app.post('/api/auth/enviar-contato', async (c) => {
       success: true,
       message: 'Mensagem enviada com sucesso! Verifique seu WhatsApp.',
       numeroAgente: numeroFormatado
+    });
+  } catch (error: any) {
+    console.error('Erro ao enviar contato:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao enviar mensagem' }, 500);
+  }
+});
+
+// Ativar assinatura (atualiza status para 'ativo')
+app.post('/api/auth/ativar-assinatura', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, telefoneFormatado);
+    if (!usuario) {
+      return c.json({ success: false, error: 'Usuário não encontrado' }, 404);
+    }
+    
+    const body = await c.req.json();
+    const { planoId } = body;
+    
+    console.log(`💳 Ativando assinatura para ${telefoneFormatado} - Plano: ${planoId}`);
+    
+    // Calcula a data de expiração baseada no plano
+    const agora = new Date();
+    let dataExpiracao: Date;
+    
+    switch (planoId) {
+      case 'mensal':
+        dataExpiracao = new Date(agora.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 dias
+        break;
+      case 'trimestral':
+        dataExpiracao = new Date(agora.getTime() + 90 * 24 * 60 * 60 * 1000); // 90 dias
+        break;
+      case 'anual':
+        dataExpiracao = new Date(agora.getTime() + 365 * 24 * 60 * 60 * 1000); // 365 dias
+        break;
+      default:
+        dataExpiracao = new Date(agora.getTime() + 30 * 24 * 60 * 60 * 1000); // Default 30 dias
+    }
+    
+    // Atualiza o status do usuário para 'ativo' e salva o plano
+    await c.env.financezap_db.prepare(`
+      UPDATE usuarios 
+      SET status = 'ativo', 
+          plano = ?,
+          trialExpiraEm = ?,
+          assinaturaEm = ?
+      WHERE telefone = ?
+    `).bind(planoId, dataExpiracao.toISOString(), agora.toISOString(), telefoneFormatado).run();
+    
+    console.log(`✅ Assinatura ativada! Plano: ${planoId}, Expira em: ${dataExpiracao.toLocaleDateString('pt-BR')}`);
+    
+    return c.json({
+      success: true,
+      message: 'Assinatura ativada com sucesso!',
+      plano: planoId,
+      status: 'ativo',
+      expiraEm: dataExpiracao.toISOString()
     });
   } catch (error: any) {
     return c.json({ success: false, error: error.message || 'Erro ao enviar mensagem' }, 500);
@@ -2993,6 +3075,98 @@ app.delete('/api/agendamentos/:id', async (c) => {
   }
 });
 
+// Remover grupo de agendamentos recorrentes (pai e todos os filhos)
+app.delete('/api/agendamentos/grupo/:paiId', autenticarMiddleware, async (c) => {
+  try {
+    const paiId = parseInt(c.req.param('paiId'));
+    
+    if (isNaN(paiId)) {
+      return c.json({ success: false, error: 'ID do agendamento pai inválido' }, 400);
+    }
+    
+    // Remove todos os agendamentos filhos
+    await c.env.financezap_db.prepare(
+      'DELETE FROM agendamentos WHERE agendamentoPaiId = ?'
+    ).bind(paiId).run();
+    
+    // Remove o agendamento pai
+    await removerAgendamentoD1(c.env.financezap_db, paiId);
+    
+    return c.json({ success: true, message: 'Grupo de agendamentos removido com sucesso' });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// Adicionar nova parcela a um grupo de agendamentos recorrentes
+app.post('/api/agendamentos/:paiId/adicionar-parcela', autenticarMiddleware, async (c) => {
+  try {
+    const telefone = c.get('telefone');
+    const paiId = parseInt(c.req.param('paiId'));
+    
+    if (isNaN(paiId)) {
+      return c.json({ success: false, error: 'ID do agendamento pai inválido' }, 400);
+    }
+    
+    // Busca o agendamento pai para obter informações base
+    const agendamentoPai = await c.env.financezap_db.prepare(
+      'SELECT * FROM agendamentos WHERE id = ? OR agendamentoPaiId = ? ORDER BY parcelaAtual DESC LIMIT 1'
+    ).bind(paiId, paiId).first<any>();
+    
+    if (!agendamentoPai) {
+      return c.json({ success: false, error: 'Agendamento não encontrado' }, 404);
+    }
+    
+    // Busca a última parcela para calcular a próxima
+    const ultimaParcela = await c.env.financezap_db.prepare(
+      'SELECT * FROM agendamentos WHERE (id = ? OR agendamentoPaiId = ?) ORDER BY parcelaAtual DESC LIMIT 1'
+    ).bind(paiId, paiId).first<any>();
+    
+    const novaParcelaNumero = (ultimaParcela?.parcelaAtual || 0) + 1;
+    const novoTotal = (agendamentoPai.totalParcelas || ultimaParcela?.totalParcelas || 0) + 1;
+    
+    // Calcula a data da nova parcela (1 mês após a última)
+    const ultimaData = new Date(ultimaParcela?.dataAgendamento || new Date());
+    ultimaData.setMonth(ultimaData.getMonth() + 1);
+    const novaData = ultimaData.toISOString().split('T')[0];
+    
+    // Cria a nova parcela
+    const result = await c.env.financezap_db.prepare(`
+      INSERT INTO agendamentos (telefone, descricao, valor, dataAgendamento, tipo, status, categoria, recorrente, totalParcelas, parcelaAtual, agendamentoPaiId, criadoEm, atualizadoEm)
+      VALUES (?, ?, ?, ?, ?, 'pendente', ?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).bind(
+      telefone,
+      agendamentoPai.descricao,
+      agendamentoPai.valor,
+      novaData,
+      agendamentoPai.tipo,
+      agendamentoPai.categoria || 'outros',
+      novoTotal,
+      novaParcelaNumero,
+      paiId
+    ).run();
+    
+    // Atualiza o totalParcelas de todos os agendamentos do grupo
+    await c.env.financezap_db.prepare(`
+      UPDATE agendamentos 
+      SET totalParcelas = ?
+      WHERE id = ? OR agendamentoPaiId = ?
+    `).bind(novoTotal, paiId, paiId).run();
+    
+    return c.json({ 
+      success: true, 
+      message: 'Nova parcela adicionada com sucesso',
+      parcela: {
+        numero: novaParcelaNumero,
+        total: novoTotal,
+        data: novaData
+      }
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 // ========== ENDPOINTS DE NOTIFICAÇÕES ==========
 
 // Buscar notificações não lidas
@@ -3683,32 +3857,62 @@ app.post('/webhook/zapi', async (c) => {
         if (agendamentoExtraido && agendamentoExtraido.sucesso) {
           console.log('✅ Agendamento detectado:', JSON.stringify(agendamentoExtraido, null, 2));
           
-          // Cria o agendamento
-          const agendamentoId = await criarAgendamentoD1(c.env.financezap_db, {
-            telefone: cleanFromNumber,
-            descricao: agendamentoExtraido.descricao,
-            valor: agendamentoExtraido.valor,
-            dataAgendamento: agendamentoExtraido.dataAgendamento,
-            tipo: agendamentoExtraido.tipo,
-            categoria: agendamentoExtraido.categoria || 'outros',
-          });
+          // Verifica se é recorrente (tem parcelas)
+          const isRecorrente = agendamentoExtraido.recorrente && agendamentoExtraido.totalParcelas && agendamentoExtraido.totalParcelas > 1;
           
-          console.log('✅ Agendamento criado com ID:', agendamentoId);
+          let ids: number[];
+          if (isRecorrente) {
+            // Cria agendamentos recorrentes
+            const { criarAgendamentosRecorrentesD1 } = await import('./d1');
+            ids = await criarAgendamentosRecorrentesD1(c.env.financezap_db, {
+              telefone: cleanFromNumber,
+              descricao: agendamentoExtraido.descricao,
+              valor: agendamentoExtraido.valor,
+              dataAgendamento: agendamentoExtraido.dataAgendamento,
+              tipo: agendamentoExtraido.tipo,
+              categoria: agendamentoExtraido.categoria || 'outros',
+              totalParcelas: agendamentoExtraido.totalParcelas!,
+            });
+            console.log(`✅ ${ids.length} agendamentos recorrentes criados:`, ids);
+          } else {
+            // Cria apenas um agendamento
+            const agendamentoId = await criarAgendamentoD1(c.env.financezap_db, {
+              telefone: cleanFromNumber,
+              descricao: agendamentoExtraido.descricao,
+              valor: agendamentoExtraido.valor,
+              dataAgendamento: agendamentoExtraido.dataAgendamento,
+              tipo: agendamentoExtraido.tipo,
+              categoria: agendamentoExtraido.categoria || 'outros',
+            });
+            ids = [agendamentoId];
+            console.log('✅ Agendamento criado com ID:', agendamentoId);
+          }
           
           // Formata a resposta
           const tipoTexto = agendamentoExtraido.tipo === 'pagamento' ? 'Pagamento' : 'Recebimento';
           const dataFormatada = new Date(agendamentoExtraido.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR');
           
-          const respostaAgendamento = `✅ Agendamento criado com sucesso!\n\n` +
-            `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n` +
-            `💰 Valor: R$ ${agendamentoExtraido.valor.toFixed(2)}\n` +
-            `📆 Data: ${dataFormatada}\n\n` +
-            `Você receberá um lembrete no dia ${dataFormatada}.\n\n` +
-            `💡 Quando pagar/receber, responda "pago" ou "recebido" para registrar automaticamente.`;
+          let respostaAgendamento = '';
+          if (isRecorrente) {
+            respostaAgendamento = `✅ Agendamento recorrente criado com sucesso!\n\n` +
+              `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n` +
+              `💰 Valor: R$ ${agendamentoExtraido.valor.toFixed(2)} por parcela\n` +
+              `📊 Total de parcelas: ${agendamentoExtraido.totalParcelas}\n` +
+              `📆 Primeira parcela: ${dataFormatada}\n\n` +
+              `Você receberá lembretes mensais até a parcela ${agendamentoExtraido.totalParcelas}.\n\n` +
+              `💡 Quando pagar/receber, responda "pago" ou "recebido" para registrar automaticamente.`;
+          } else {
+            respostaAgendamento = `✅ Agendamento criado com sucesso!\n\n` +
+              `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n` +
+              `💰 Valor: R$ ${agendamentoExtraido.valor.toFixed(2)}\n` +
+              `📆 Data: ${dataFormatada}\n\n` +
+              `Você receberá um lembrete no dia ${dataFormatada}.\n\n` +
+              `💡 Quando pagar/receber, responda "pago" ou "recebido" para registrar automaticamente.`;
+          }
           
           await enviarMensagemZApi(telefoneFormatado, respostaAgendamento, c.env);
           
-          return c.json({ success: true, message: 'Agendamento processado com sucesso' });
+          return c.json({ success: true, message: isRecorrente ? 'Agendamentos recorrentes processados com sucesso' : 'Agendamento processado com sucesso' });
         } else {
           console.log('⚠️ Não foi possível extrair agendamento da mensagem');
         }
