@@ -490,7 +490,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
             const id = await salvarTransacao(transacao);
             console.log(`   💾 Transação salva (ID: ${id}):`);
             console.log(`      📝 Descrição: ${transacaoExtraida.descricao}`);
-            console.log(`      💰 Valor: R$ ${transacaoExtraida.valor.toFixed(2)}`);
+            console.log(`      💰 Valor: ${formatarMoeda(transacaoExtraida.valor)}`);
             console.log(`      🏷️  Categoria: ${transacaoExtraida.categoria}`);
             console.log(`      📊 Tipo: ${transacao.tipo} (${transacao.tipo === 'entrada' ? 'Entrada' : 'Saída'})`);
             console.log(`      💳 Método: ${transacao.metodo}`);
@@ -763,7 +763,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
             
             const resposta = `✅ Agendamento marcado como pago!\n\n` +
               `📝 ${agendamentoEncontrado.descricao}\n` +
-              `💰 R$ ${agendamentoEncontrado.valor.toFixed(2)}\n` +
+              `💰 ${formatarMoeda(agendamentoEncontrado.valor)}\n` +
               `📅 ${new Date(agendamentoEncontrado.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR')}\n\n` +
               `A transação foi registrada automaticamente.`;
             
@@ -801,7 +801,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
           const dataFormatada = new Date(ag.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR');
           const tipoTexto = ag.tipo === 'pagamento' ? 'Pagamento' : 'Recebimento';
           resposta += `${index + 1}. *${ag.descricao}*\n`;
-          resposta += `   💰 R$ ${ag.valor.toFixed(2)}\n`;
+          resposta += `   💰 ${formatarMoeda(ag.valor)}\n`;
           resposta += `   📅 ${dataFormatada}\n`;
           resposta += `   📋 ${tipoTexto}\n`;
           resposta += `   🆔 ID: ${ag.id}\n\n`;
@@ -1326,7 +1326,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
               const dataFormatada = new Date(ag.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR');
               const tipoTexto = ag.tipo === 'pagamento' ? 'Pagamento' : 'Recebimento';
               resposta += `\n${index + 1}. *${ag.descricao}*\n`;
-              resposta += `   💰 R$ ${ag.valor.toFixed(2)}\n`;
+              resposta += `   💰 ${formatarMoeda(ag.valor)}\n`;
               resposta += `   📅 ${dataFormatada}\n`;
               resposta += `   📋 ${tipoTexto}\n`;
               resposta += `   🆔 ID: ${ag.id}\n`;
@@ -1337,7 +1337,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
             resposta += `\n✅ *Pagos:*\n`;
             pagos.slice(0, 5).forEach((ag, index) => {
               const dataFormatada = new Date(ag.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR');
-              resposta += `\n${index + 1}. ${ag.descricao} - R$ ${ag.valor.toFixed(2)} (${dataFormatada})`;
+              resposta += `\n${index + 1}. ${ag.descricao} - ${formatarMoeda(ag.valor)} (${dataFormatada})`;
             });
             if (pagos.length > 5) {
               resposta += `\n   ... e mais ${pagos.length - 5} agendamento(s) pago(s)`;
@@ -1434,7 +1434,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
             
             let respostaAgendamento = `✅ Agendamento criado com sucesso!\n\n`;
             respostaAgendamento += `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n`;
-            respostaAgendamento += `💰 Valor: R$ ${agendamentoExtraido.valor.toFixed(2)}\n`;
+            respostaAgendamento += `💰 Valor: ${formatarMoeda(agendamentoExtraido.valor)}\n`;
             respostaAgendamento += `📆 Data: ${dataFormatada}\n\n`;
             respostaAgendamento += `Você receberá um lembrete no dia ${dataFormatada}.`;
             respostaAgendamento += `\n\n💡 Quando pagar/receber, responda "pago" ou "recebido" para registrar automaticamente.`;
@@ -1533,7 +1533,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
             
             let respostaConfirmacao = `✅ Agendamento marcado como ${agendamento.tipo === 'recebimento' ? 'recebido' : 'pago'}!\n\n`;
             respostaConfirmacao += `📝 ${agendamento.descricao}\n`;
-            respostaConfirmacao += `💰 Valor: R$ ${agendamento.valor.toFixed(2)}\n`;
+            respostaConfirmacao += `💰 Valor: ${formatarMoeda(agendamento.valor)}\n`;
             respostaConfirmacao += `🆔 ID: ${agendamento.id}\n`;
             respostaConfirmacao += `📊 Transação registrada automaticamente.`;
             
@@ -1688,7 +1688,7 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
                   id: id
                 });
                 
-                console.log(`✅ Transação salva (ID: ${id}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
+                console.log(`✅ Transação salva (ID: ${id}): ${transacaoExtraida.descricao} - ${formatarMoeda(transacaoExtraida.valor)}`);
               } catch (error: any) {
                 console.error(`❌ Erro ao salvar transação: ${error.message}`);
               }
@@ -1807,29 +1807,29 @@ app.post('/webhook/zapi', express.json(), async (req: express.Request, res: expr
         
         // Se não foi transação nem pergunta, envia mensagem de ajuda
         if (intencao.intencao !== 'transacao' && intencao.intencao !== 'desconhecida') {
-          console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
-          // MELHORIA: Mensagem mais útil quando não entende
-          const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
-            '💡 *Dicas:*\n' +
-            '• Para registrar gasto: "comprei café por 5 reais"\n' +
-            '• Para registrar receita: "recebi 500 reais"\n' +
-            '• Para ver resumo: "resumo financeiro"\n' +
-            '• Para ajuda: "ajuda" ou "/ajuda"';
-          
-          await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
-          
-          if (zapiEstaConfigurada()) {
-            await enviarMensagemZApi(fromNumber, mensagemAmigavel);
-          } else if (twilioWhatsAppNumber) {
-            try {
-              await client.messages.create({
-                from: twilioWhatsAppNumber,
-                to: fromNumber,
-                body: mensagemAmigavel
-              });
-            } catch (error: any) {
-              console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
-            }
+              console.log('ℹ️  Nenhuma transação financeira encontrada na mensagem');
+              // MELHORIA: Mensagem mais útil quando não entende
+              const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
+                '💡 *Dicas:*\n' +
+                '• Para registrar gasto: "comprei café por 5 reais"\n' +
+                '• Para registrar receita: "recebi 500 reais"\n' +
+                '• Para ver resumo: "resumo financeiro"\n' +
+                '• Para ajuda: "ajuda" ou "/ajuda"';
+              
+              await adicionarMensagemContexto(cleanFromNumber, 'assistant', mensagemAmigavel);
+              
+              if (zapiEstaConfigurada()) {
+                await enviarMensagemZApi(fromNumber, mensagemAmigavel);
+              } else if (twilioWhatsAppNumber) {
+                try {
+                  await client.messages.create({
+                    from: twilioWhatsAppNumber,
+                    to: fromNumber,
+                    body: mensagemAmigavel
+                  });
+                } catch (error: any) {
+                  console.error('❌ Erro ao enviar resposta via Twilio:', error.message);
+                }
           }
         }
       } catch (error: any) {

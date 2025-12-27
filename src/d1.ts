@@ -148,6 +148,57 @@ function telefoneVariacoes(telefone: string): string[] {
   return unicas;
 }
 
+// Normaliza nomes de carteira para comparação (minúsculas, sem acentos, sem pontuação)
+function normalizarTextoCarteira(texto: string): string {
+  return (texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9\\s]/g, ' ')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// Distância de Levenshtein simples para pontuar similaridade
+function distanciaLevenshtein(a: string, b: string): number {
+  const s = normalizarTextoCarteira(a);
+  const t = normalizarTextoCarteira(b);
+  if (s === t) return 0;
+  if (s.length === 0) return t.length;
+  if (t.length === 0) return s.length;
+
+  const matrix: number[][] = Array.from({ length: s.length + 1 }, () => new Array(t.length + 1).fill(0));
+  for (let i = 0; i <= s.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= t.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= s.length; i++) {
+    for (let j = 1; j <= t.length; j++) {
+      const custo = s[i - 1] === t[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,        // remoção
+        matrix[i][j - 1] + 1,        // inserção
+        matrix[i - 1][j - 1] + custo // substituição
+      );
+    }
+  }
+
+  return matrix[s.length][t.length];
+}
+
+// Retorna score de similaridade 0..1 (1 = igual). Inclui bônus se substring.
+function scoreSemelhancaCarteira(a: string, b: string): number {
+  const normA = normalizarTextoCarteira(a);
+  const normB = normalizarTextoCarteira(b);
+  if (!normA || !normB) return 0;
+  if (normA === normB) return 1;
+
+  const dist = distanciaLevenshtein(normA, normB);
+  const maxLen = Math.max(normA.length, normB.length);
+  const base = 1 - dist / maxLen;
+  const substringBonus = normA.includes(normB) || normB.includes(normA) ? 0.15 : 0;
+  return Math.min(1, Math.max(0, base + substringBonus));
+}
+
 function montarWhere(filtros: {
   telefone?: string;
   dataInicio?: string;
@@ -415,7 +466,7 @@ export async function buscarTransacoes(
        FROM transacoes t
        LEFT JOIN carteiras c ON t.carteiraId = c.id AND c.ativo = 1
        ${whereClauseComAlias}
-       ORDER BY datetime(t.dataHora) DESC 
+       ORDER BY t.id DESC, datetime(t.dataHora) DESC 
        LIMIT ? OFFSET ?`
     )
     .bind(...params, limit, offset)
@@ -651,6 +702,65 @@ export async function registrarNumero(db: D1Database, telefone: string): Promise
     )
     .bind(preferida)
     .run();
+}
+
+export async function atualizarTransacao(
+  db: D1Database,
+  id: number,
+  transacao: Partial<Omit<TransacaoRecord, 'id' | 'telefone'>>
+): Promise<boolean> {
+  const campos: string[] = [];
+  const valores: any[] = [];
+  
+  if (transacao.descricao !== undefined) {
+    campos.push('descricao = ?');
+    valores.push(transacao.descricao.trim());
+  }
+  
+  if (transacao.valor !== undefined) {
+    campos.push('valor = ?');
+    valores.push(transacao.valor);
+  }
+  
+  if (transacao.categoria !== undefined) {
+    campos.push('categoria = ?');
+    valores.push(transacao.categoria);
+  }
+  
+  if (transacao.tipo !== undefined) {
+    campos.push('tipo = ?');
+    valores.push(transacao.tipo);
+  }
+  
+  if (transacao.metodo !== undefined) {
+    campos.push('metodo = ?');
+    valores.push(transacao.metodo);
+  }
+  
+  if (transacao.dataHora !== undefined) {
+    campos.push('dataHora = ?');
+    valores.push(transacao.dataHora);
+  }
+  
+  if (transacao.data !== undefined) {
+    campos.push('data = ?');
+    valores.push(transacao.data);
+  }
+  
+  if (transacao.carteiraId !== undefined) {
+    campos.push('carteiraId = ?');
+    valores.push(transacao.carteiraId);
+  }
+  
+  if (campos.length === 0) {
+    return false; // Nenhum campo para atualizar
+  }
+  
+  valores.push(id);
+  const query = `UPDATE transacoes SET ${campos.join(', ')} WHERE id = ?`;
+  
+  const result = await db.prepare(query).bind(...valores).run();
+  return (result.meta.changes || 0) > 0;
 }
 
 export async function removerTransacao(db: D1Database, id: number): Promise<boolean> {
@@ -2049,6 +2159,28 @@ export interface CarteiraRecord {
   atualizadoEm: string;
 }
 
+export interface CarteiraAliasRecord {
+  id?: number;
+  telefone: string;
+  carteiraId: number;
+  alias: string;
+  frequenciaUso: number;
+  ultimoUso?: string;
+}
+
+interface PreferenciasFinanceirasRecord {
+  telefone: string;
+  ultimaCarteiraId?: number | null;
+  ultimaAtualizacao?: string;
+}
+
+export interface CarteiraResolvida {
+  carteira: CarteiraRecord | null;
+  origem: string;
+  score: number;
+  aliasUsado?: string;
+}
+
 // Garante que apenas uma carteira seja padrão por vez
 async function garantirApenasUmaCarteiraPadraoD1(
   db: D1Database,
@@ -2187,6 +2319,211 @@ export async function buscarCarteiraPadraoD1(
   }
   
   return null;
+}
+
+async function buscarAliasesCarteiraD1(
+  db: D1Database,
+  telefone: string
+): Promise<CarteiraAliasRecord[]> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    const aliases = await db
+      .prepare(`SELECT * FROM carteira_aliases WHERE telefone IN (${variacoes.map(() => '?').join(',')})`)
+      .bind(...variacoes)
+      .all<CarteiraAliasRecord>();
+    return aliases.results || [];
+  } catch (error: any) {
+    if (error.message && error.message.includes('no such table')) {
+      return [];
+    }
+    console.error('❌ Erro ao buscar aliases de carteira:', error);
+    return [];
+  }
+}
+
+export async function registrarAliasCarteiraD1(
+  db: D1Database,
+  telefone: string,
+  carteiraId: number,
+  alias: string | undefined | null
+): Promise<void> {
+  try {
+    const aliasNormalizado = normalizarTextoCarteira(alias || '');
+    if (!aliasNormalizado) return;
+
+    const variacoes = telefoneVariacoes(telefone);
+    const preferida = variacoes[0];
+
+    await db
+      .prepare(`
+        INSERT INTO carteira_aliases (telefone, carteiraId, alias, frequenciaUso, ultimoUso)
+        VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(telefone, alias) DO UPDATE SET 
+          carteiraId = excluded.carteiraId,
+          frequenciaUso = carteira_aliases.frequenciaUso + 1,
+          ultimoUso = CURRENT_TIMESTAMP
+      `)
+      .bind(preferida, carteiraId, aliasNormalizado)
+      .run();
+  } catch (error: any) {
+    if (error.message && error.message.includes('no such table')) {
+      console.warn('⚠️ Tabela carteira_aliases não existe ainda, ignorando registro de alias.');
+      return;
+    }
+    console.error('❌ Erro ao registrar alias de carteira:', error);
+  }
+}
+
+export async function registrarUltimaCarteiraUsadaD1(
+  db: D1Database,
+  telefone: string,
+  carteiraId: number | null
+): Promise<void> {
+  try {
+    if (!carteiraId) return;
+    const variacoes = telefoneVariacoes(telefone);
+    const preferida = variacoes[0];
+
+    await db
+      .prepare(`
+        INSERT INTO preferencias_financeiras (telefone, ultimaCarteiraId, ultimaAtualizacao)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(telefone) DO UPDATE SET 
+          ultimaCarteiraId = excluded.ultimaCarteiraId,
+          ultimaAtualizacao = CURRENT_TIMESTAMP
+      `)
+      .bind(preferida, carteiraId)
+      .run();
+  } catch (error: any) {
+    if (error.message && error.message.includes('no such table')) {
+      console.warn('⚠️ Tabela preferencias_financeiras não existe ainda, ignorando última carteira.');
+      return;
+    }
+    console.error('❌ Erro ao registrar última carteira usada:', error);
+  }
+}
+
+export async function obterUltimaCarteiraUsadaD1(
+  db: D1Database,
+  telefone: string
+): Promise<CarteiraRecord | null> {
+  try {
+    const variacoes = telefoneVariacoes(telefone);
+    const pref = await db
+      .prepare(
+        `SELECT ultimaCarteiraId FROM preferencias_financeiras 
+         WHERE telefone IN (${variacoes.map(() => '?').join(',')})
+         ORDER BY ultimaAtualizacao DESC LIMIT 1`
+      )
+      .bind(...variacoes)
+      .first<PreferenciasFinanceirasRecord>();
+
+    if (pref?.ultimaCarteiraId) {
+      const carteira = await buscarCarteiraPorIdD1(db, pref.ultimaCarteiraId, telefone);
+      return carteira || null;
+    }
+    return null;
+  } catch (error: any) {
+    if (error.message && error.message.includes('no such table')) {
+      return null;
+    }
+    console.error('❌ Erro ao obter última carteira usada:', error);
+    return null;
+  }
+}
+
+export async function resolverCarteiraPorTextoD1(
+  db: D1Database,
+  telefone: string,
+  opcoes: {
+    nomeInformado?: string;
+    textoOriginal?: string;
+    tipoPreferido?: 'debito' | 'credito';
+  }
+): Promise<CarteiraResolvida> {
+  const carteiras = await buscarCarteirasD1(db, telefone);
+  if (!carteiras.length) {
+    return { carteira: null, origem: 'nenhuma-carteira', score: 0 };
+  }
+
+  const aliases = await buscarAliasesCarteiraD1(db, telefone);
+  const alvoTexto = opcoes.nomeInformado || opcoes.textoOriginal || '';
+  const alvoNormalizado = normalizarTextoCarteira(alvoTexto);
+  
+  // Extrai palavras do texto para busca mais precisa
+  const palavrasTexto = alvoNormalizado.split(/\s+/).filter(p => p.length >= 3); // palavras com 3+ caracteres
+
+  let melhor: CarteiraResolvida = { carteira: null, origem: 'nenhuma', score: 0 };
+
+  if (alvoTexto) {
+    for (const carteira of carteiras) {
+      const candidatos = [
+        carteira.nome,
+        ...aliases.filter(a => a.carteiraId === carteira.id).map(a => a.alias),
+      ];
+
+      for (const candidato of candidatos) {
+        const candNorm = normalizarTextoCarteira(candidato);
+        
+        // Verifica se o candidato aparece como substring no texto (caso mais comum)
+        const substringHit = alvoNormalizado.includes(candNorm);
+        // Verifica se alguma palavra do texto está no candidato ou vice-versa
+        const palavraMatch = palavrasTexto.some(palavra => 
+          candNorm.includes(palavra) || palavra.includes(candNorm)
+        );
+        
+        // Score base: se há substring exata, score alto; senão usa similaridade
+        let baseScore = 0;
+        if (substringHit) {
+          baseScore = 0.8; // Match exato de substring
+        } else if (palavraMatch) {
+          baseScore = 0.6; // Match de palavra
+        } else {
+          baseScore = scoreSemelhancaCarteira(alvoTexto, candidato);
+        }
+        
+        const bonusSubstring = substringHit ? 0.2 : (palavraMatch ? 0.15 : 0);
+        const bonusTipo = opcoes.tipoPreferido && carteira.tipo === opcoes.tipoPreferido ? 0.07 : 0;
+        const aliasFreq = aliases.find(a => a.alias === candNorm && a.carteiraId === carteira.id)?.frequenciaUso ?? 0;
+        const bonusFrequencia = Math.min(aliasFreq / 20, 0.1); // até +0.1
+        const score = baseScore + bonusSubstring + bonusTipo + bonusFrequencia;
+
+        if (score > melhor.score) {
+          melhor = {
+            carteira,
+            origem: candidato === carteira.nome ? 'nome' : 'alias',
+            score,
+            aliasUsado: candidato,
+          };
+        }
+      }
+    }
+
+    // Log para debug
+    if (melhor.carteira) {
+      console.log(`🎯 Resolver carteira: encontrou "${melhor.carteira.nome}" (score: ${melhor.score.toFixed(2)}, origem: ${melhor.origem})`);
+    }
+
+    // Aceita match se score >= 0.3 (mais permissivo) ou se há substring exata
+    if (melhor.carteira && (melhor.score >= 0.3 || alvoNormalizado.includes(normalizarTextoCarteira(melhor.carteira.nome)))) {
+      return melhor;
+    }
+  }
+
+  // fallback: última carteira usada
+  const ultima = await obterUltimaCarteiraUsadaD1(db, telefone);
+  if (ultima) {
+    return { carteira: ultima, origem: 'ultima-carteira', score: 0.5 };
+  }
+
+  // fallback: carteira padrão
+  const padrao = await buscarCarteiraPadraoD1(db, telefone);
+  if (padrao) {
+    return { carteira: padrao, origem: 'carteira-padrao', score: 0.45 };
+  }
+
+  // fallback final: primeira carteira
+  return { carteira: carteiras[0], origem: 'primeira-carteira', score: 0.3 };
 }
 
 export async function criarCarteiraD1(

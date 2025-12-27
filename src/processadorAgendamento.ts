@@ -127,24 +127,55 @@ Retorne APENAS o JSON, sem texto adicional.`;
     });
 
     const resposta = completion.choices[0]?.message?.content || '';
-    let jsonStr = resposta.trim();
+    
+    // Função auxiliar para extrair JSON válido
+    function extrairJSON(texto: string): any {
+      let limpo = texto.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
 
-    // Remove markdown code blocks se houver
-    if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    }
-
-    // Remove texto antes/depois do JSON
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+      // Remove texto antes do primeiro {
+      const primeiroBrace = limpo.indexOf('{');
+      if (primeiroBrace > 0) {
+        limpo = limpo.substring(primeiroBrace);
+      }
+      
+      // Remove texto depois do último }
+      const ultimoBrace = limpo.lastIndexOf('}');
+      if (ultimoBrace >= 0 && ultimoBrace < limpo.length - 1) {
+        limpo = limpo.substring(0, ultimoBrace + 1);
+      }
+      
+      if (limpo.toLowerCase() === 'null' || limpo.trim() === '') {
+        return null;
+      }
+      
+      const jsonMatch = limpo.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      jsonStr = jsonMatch[0];
+        try {
+          return JSON.parse(jsonMatch[0]);
+        } catch (e) {
+          const jsonProfundo = limpo.match(/\{[\s\S]*?\}/);
+          if (jsonProfundo) {
+            try {
+              return JSON.parse(jsonProfundo[0]);
+            } catch (e2) {
+              return null;
+            }
+          }
+        }
+      }
+      
+      try {
+        return JSON.parse(limpo);
+      } catch (e) {
+        return null;
+      }
     }
 
-    if (jsonStr.toLowerCase() === 'null' || jsonStr.trim() === '') {
+    const resultado = extrairJSON(resposta);
+    
+    if (!resultado) {
       return null;
     }
-
-    const resultado = JSON.parse(jsonStr);
 
     if (!resultado.descricao || !resultado.valor || !resultado.dataAgendamento) {
       return null;

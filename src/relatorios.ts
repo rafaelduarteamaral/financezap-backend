@@ -3,6 +3,7 @@
 import { D1Database, TransacaoRecord } from './d1';
 import { buscarTransacoes } from './d1';
 import { buscarCarteiraPadraoD1 } from './d1';
+import { formatarMoeda } from './formatadorMensagens';
 
 export interface RelatorioPeriodo {
   dataInicio: string;
@@ -196,12 +197,12 @@ export function formatarRelatorioWhatsApp(
   relatorio += '───────────────────────\n\n';
 
   // Despesas
-  relatorio += `🔻 Despesas totais: *R$ ${despesas.total.toFixed(2).replace('.', ',')}*\n\n`;
-  relatorio += `* Pago: *R$ ${despesas.pago.toFixed(2).replace('.', ',')}* ✅\n\n`;
-  relatorio += `* Não pago: *R$ ${despesas.naoPago.toFixed(2).replace('.', ',')}*\n\n`;
+  relatorio += `🔻 Despesas totais: *${formatarMoeda(despesas.total)}*\n\n`;
+  relatorio += `* Pago: *${formatarMoeda(despesas.pago)}* ✅\n\n`;
+  relatorio += `* Não pago: *${formatarMoeda(despesas.naoPago)}*\n\n`;
 
   // Receitas
-  relatorio += `🔺 Receitas totais: *R$ ${receitas.total.toFixed(2).replace('.', ',')}*\n\n`;
+  relatorio += `🔺 Receitas totais: *${formatarMoeda(receitas.total)}*\n\n`;
   relatorio += '───────────────────────\n\n';
 
   // Resumo por categoria (apenas despesas)
@@ -210,7 +211,7 @@ export function formatarRelatorioWhatsApp(
     
     despesas.porCategoria.forEach(cat => {
       const emoji = obterEmojiCategoria(cat.categoria);
-      relatorio += `- ${emoji} ${cat.categoria} — Pago: *R$ ${cat.pago.toFixed(2).replace('.', ',')}* | Não pago: *R$ ${cat.naoPago.toFixed(2).replace('.', ',')}*\n`;
+      relatorio += `- ${emoji} ${cat.categoria} — Pago: *${formatarMoeda(cat.pago)}* | Não pago: *${formatarMoeda(cat.naoPago)}*\n`;
     });
     
     relatorio += '\n';
@@ -236,7 +237,7 @@ export function formatarRelatorioWhatsApp(
       // Busca nome da carteira (se houver)
       const contaNome = carteiraNome || 'nubank';
       
-      relatorio += `${index + 1}. ${identificador} — ${t.descricao} — ${dataFormatada} — *R$ ${t.valor.toFixed(2).replace('.', ',')}* — Conta: ${contaNome} — ${statusPago}\n\n`;
+      relatorio += `${index + 1}. ${identificador} — ${t.descricao} — ${dataFormatada} — *${formatarMoeda(t.valor)}* — Conta: ${contaNome} — ${statusPago}\n\n`;
     });
     
     relatorio += '───────────────────────\n\n';
@@ -275,18 +276,18 @@ export function formatarRelatorioMensalCompleto(
   const saldoDisponivel = receitas.recebido - despesas.pago;
   
   relatorio += `🏦 Seu Saldo até dia ${ultimoDia.getDate()}/${String(ultimoDia.getMonth() + 1).padStart(2, '0')}\n\n`;
-  relatorio += `Previsto: ${saldoPrevisto >= 0 ? '' : '-'}R$ ${Math.abs(saldoPrevisto).toFixed(2).replace('.', ',')}\n`;
-  relatorio += `Disponível: ${saldoDisponivel >= 0 ? '' : '-'}R$ ${Math.abs(saldoDisponivel).toFixed(2).replace('.', ',')}\n\n`;
+  relatorio += `Previsto: ${formatarMoeda(saldoPrevisto)}\n`;
+  relatorio += `Disponível: ${formatarMoeda(saldoDisponivel)}\n\n`;
   
   // Receitas
   relatorio += '📥 Receitas\n\n';
-  relatorio += `Recebido: R$ ${receitas.recebido.toFixed(2).replace('.', ',')}\n`;
-  relatorio += `A receber: R$ ${receitas.aReceber.toFixed(2).replace('.', ',')}\n\n`;
+  relatorio += `Recebido: ${formatarMoeda(receitas.recebido)}\n`;
+  relatorio += `A receber: ${formatarMoeda(receitas.aReceber)}\n\n`;
   
   // Despesas
   relatorio += '📤 Despesas\n\n';
-  relatorio += `Pago: R$ ${despesas.pago.toFixed(2).replace('.', ',')}\n`;
-  relatorio += `A pagar: R$ ${despesas.naoPago.toFixed(2).replace('.', ',')}\n\n`;
+  relatorio += `Pago: ${formatarMoeda(despesas.pago)}\n`;
+  relatorio += `A pagar: ${formatarMoeda(despesas.naoPago)}\n\n`;
   
   // Categorias de despesas
   if (despesas.porCategoria.length > 0) {
@@ -294,7 +295,7 @@ export function formatarRelatorioMensalCompleto(
     const totalDespesas = despesas.total;
     despesas.porCategoria.forEach(cat => {
       const percentual = totalDespesas > 0 ? ((cat.total / totalDespesas) * 100).toFixed(0) : '0';
-      relatorio += `${cat.categoria} → R$ ${cat.total.toFixed(2).replace('.', ',')} (${percentual}%)\n`;
+      relatorio += `${cat.categoria} → ${formatarMoeda(cat.total)} (${percentual}%)\n`;
     });
     relatorio += '\n';
   } else {

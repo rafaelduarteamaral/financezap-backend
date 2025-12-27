@@ -2,6 +2,7 @@
 
 import Groq from 'groq-sdk';
 import { GoogleGenAI } from '@google/genai';
+import { formatarMoeda } from './formatadorMensagens';
 
 // Inicializa Groq (se configurado)
 const groq = process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim() !== '' 
@@ -227,17 +228,17 @@ export async function processarChatFinanceiro(
 
   // Prepara o contexto financeiro
   const estatisticasTexto = `
-- Total gasto: R$ ${estatisticas.totalGasto?.toFixed(2) || '0.00'}
+- Total gasto: ${formatarMoeda(estatisticas.totalGasto || 0)}
 - Total de transações: ${estatisticas.totalTransacoes || 0}
-- Média por transação: R$ ${estatisticas.mediaGasto?.toFixed(2) || '0.00'}
-- Maior gasto: R$ ${estatisticas.maiorGasto?.toFixed(2) || '0.00'}
-- Menor gasto: R$ ${estatisticas.menorGasto?.toFixed(2) || '0.00'}
-- Gasto hoje: R$ ${estatisticas.gastoHoje?.toFixed(2) || '0.00'}
-- Gasto do mês: R$ ${estatisticas.gastoMes?.toFixed(2) || '0.00'}
+- Média por transação: ${formatarMoeda(estatisticas.mediaGasto || 0)}
+- Maior gasto: ${formatarMoeda(estatisticas.maiorGasto || 0)}
+- Menor gasto: ${formatarMoeda(estatisticas.menorGasto || 0)}
+- Gasto hoje: ${formatarMoeda(estatisticas.gastoHoje || 0)}
+- Gasto do mês: ${formatarMoeda(estatisticas.gastoMes || 0)}
   `.trim();
 
   const transacoesTexto = transacoes.slice(0, 10).map((t: any) => 
-    `- ${t.descricao}: R$ ${t.valor.toFixed(2)} (${t.categoria})`
+    `- ${t.descricao}: ${formatarMoeda(t.valor)} (${t.categoria})`
   ).join('\n');
 
   // MELHORIA: Adiciona histórico de conversação ao prompt

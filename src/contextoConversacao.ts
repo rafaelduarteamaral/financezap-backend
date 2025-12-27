@@ -64,34 +64,47 @@ export async function obterContextoConversacao(telefone: string): Promise<Conver
 }
 
 /**
- * Obtém contexto de conversação (D1)
+ * Obtém contexto de conversação (D1) - PERSISTENTE
  */
 export async function obterContextoConversacaoD1(
   db: D1Database,
   telefone: string
 ): Promise<ConversaContexto | null> {
   try {
-    // Limpa cache expirado
-    const agora = new Date();
-    for (const [key, contexto] of contextoCache.entries()) {
-      if (agora.getTime() - contexto.ultimaAtualizacao.getTime() > CONTEXTO_EXPIRACAO_MS) {
-        contextoCache.delete(key);
-      }
+    // Busca no banco de dados (persistente)
+    const mensagens = await db
+      .prepare(
+        `SELECT role, content, criadoEm 
+         FROM conversacao_contexto 
+         WHERE telefone = ? 
+         ORDER BY criadoEm DESC 
+         LIMIT 20`
+      )
+      .bind(telefone)
+      .all<{
+        role: string;
+        content: string;
+        criadoEm: string;
+      }>();
+
+    if (!mensagens.results || mensagens.results.length === 0) {
+      return null;
     }
 
-    // Busca no cache
-    const contexto = contextoCache.get(telefone);
-    if (contexto) {
-      // Verifica se não expirou
-      const tempoDecorrido = agora.getTime() - contexto.ultimaAtualizacao.getTime();
-      if (tempoDecorrido < CONTEXTO_EXPIRACAO_MS) {
-        return contexto;
-      } else {
-        contextoCache.delete(telefone);
-      }
-    }
+    // Converte para formato ConversaContexto
+    const contexto: ConversaContexto = {
+      telefone,
+      mensagens: mensagens.results
+        .reverse() // Inverte para ordem cronológica
+        .map((msg) => ({
+          role: msg.role as 'user' | 'assistant',
+          content: msg.content,
+          timestamp: new Date(msg.criadoEm),
+        })),
+      ultimaAtualizacao: new Date(),
+    };
 
-    return null;
+    return contexto;
   } catch (error) {
     console.error('❌ Erro ao obter contexto D1:', error);
     return null;
@@ -165,7 +178,7 @@ export async function adicionarMensagemContexto(
 }
 
 /**
- * Adiciona mensagem ao contexto (D1)
+ * Adiciona mensagem ao contexto (D1) - PERSISTENTE
  */
 export async function adicionarMensagemContextoD1(
   db: D1Database,
@@ -173,19 +186,34 @@ export async function adicionarMensagemContextoD1(
   role: 'user' | 'assistant',
   content: string
 ): Promise<void> {
-  const contexto = await obterContextoConversacaoD1(db, telefone) || {
-    telefone,
-    mensagens: [],
-    ultimaAtualizacao: new Date(),
-  };
+  try {
+    // Salva mensagem no banco de dados
+    await db
+      .prepare(
+        `INSERT INTO conversacao_contexto (telefone, role, content, criadoEm)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)`
+      )
+      .bind(telefone, role, content)
+      .run();
 
-  contexto.mensagens.push({
-    role,
-    content,
-    timestamp: new Date(),
-  });
-
-  await salvarContextoConversacaoD1(db, telefone, contexto);
+    // Limita histórico a últimas 50 mensagens por telefone
+    await db
+      .prepare(
+        `DELETE FROM conversacao_contexto 
+         WHERE telefone = ? 
+         AND id NOT IN (
+           SELECT id FROM conversacao_contexto 
+           WHERE telefone = ? 
+           ORDER BY criadoEm DESC 
+           LIMIT 50
+         )`
+      )
+      .bind(telefone, telefone)
+      .run();
+  } catch (error) {
+    console.error('❌ Erro ao adicionar mensagem ao contexto D1:', error);
+    throw error;
+  }
 }
 
 /**
@@ -196,10 +224,18 @@ export async function limparContextoConversacao(telefone: string): Promise<void>
 }
 
 /**
- * Limpa contexto de conversação (D1)
+ * Limpa contexto de conversação (D1) - PERSISTENTE
  */
 export async function limparContextoConversacaoD1(db: D1Database, telefone: string): Promise<void> {
-  contextoCache.delete(telefone);
+  try {
+    await db
+      .prepare('DELETE FROM conversacao_contexto WHERE telefone = ?')
+      .bind(telefone)
+      .run();
+  } catch (error) {
+    console.error('❌ Erro ao limpar contexto D1:', error);
+    throw error;
+  }
 }
 
 /**

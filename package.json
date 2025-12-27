@@ -12,7 +12,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:ci": "jest --ci --coverage --maxWorkers=2 --bail",
-    "dev:worker": "wrangler dev --config wrangler.toml --local",
+    "dev:worker": "wrangler dev --config wrangler.toml",
+    "dev:worker:local": "wrangler dev --config wrangler.toml --local",
     "deploy:worker": "npm run build:skip-tests && wrangler deploy --config wrangler.toml",
     "deploy:worker:with-tests": "npm run test:ci && wrangler deploy --config wrangler.toml",
     "deploy:safe": "bash scripts/deploy.sh"

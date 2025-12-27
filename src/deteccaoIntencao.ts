@@ -134,7 +134,21 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     };
   }
 
-  // 7. Verifica se é exclusão
+  // 7. Verifica se é edição de agendamento
+  const palavrasEdicaoAgendamento = [
+    'editar agendamento',
+    'alterar agendamento',
+    'corrigir agendamento',
+    'mudar agendamento',
+    'atualizar agendamento',
+    'editar agendamentos',
+    'alterar agendamentos',
+  ];
+  if (palavrasEdicaoAgendamento.some(palavra => mensagemLower.includes(palavra))) {
+    return { intencao: 'edicao', confianca: 0.9, detalhes: { tipoAgendamento: 'pagamento' } };
+  }
+
+  // 8. Verifica se é exclusão
   const palavrasExclusao = [
     'excluir',
     'deletar',
@@ -149,7 +163,7 @@ export function detectarIntencao(mensagem: string, contexto?: any): ResultadoDet
     return { intencao: 'exclusao', confianca: 0.85 };
   }
 
-  // 8. Verifica se é correção
+  // 9. Verifica se é correção
   const palavrasCorrecao = ['corrigir', 'correção', 'correcao', 'alterar', 'mudar', 'editar'];
   if (palavrasCorrecao.some(palavra => mensagemLower.includes(palavra))) {
     return { intencao: 'correcao', confianca: 0.75 };

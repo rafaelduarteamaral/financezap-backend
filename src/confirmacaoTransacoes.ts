@@ -1,5 +1,7 @@
 // Sistema de confirmação de transações antes de salvar
 
+import { formatarMoeda } from './formatadorMensagens';
+
 export interface TransacaoParaConfirmar {
   descricao: string;
   valor: number;
@@ -89,7 +91,7 @@ export function formatarMensagemConfirmacao(transacoes: TransacaoParaConfirmar[]
     const metodoTexto = t.metodo === 'credito' ? 'Crédito' : 'Débito';
 
     mensagem += `${index + 1}. ${emoji} *${t.descricao}*\n`;
-    mensagem += `   💵 R$ ${t.valor.toFixed(2)}\n`;
+    mensagem += `   💵 ${formatarMoeda(t.valor)}\n`;
     mensagem += `   🏷️ ${t.categoria}\n`;
     mensagem += `   📊 ${tipoTexto} | ${metodoTexto}\n`;
     if (t.carteiraNome) {

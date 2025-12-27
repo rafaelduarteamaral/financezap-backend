@@ -1,0 +1,23 @@
+# Exemplo de arquivo .dev.vars para desenvolvimento local
+# Copie este arquivo para .dev.vars e preencha com seus valores reais
+
+# JWT Secret (use uma string longa e aleatória em produção)
+JWT_SECRET=dev-secret-key-change-in-production-min-32-chars
+
+# Z-API Configuration (opcional - para envio de mensagens)
+ZAPI_INSTANCE_ID=seu_instance_id
+ZAPI_TOKEN=seu_token
+ZAPI_CLIENT_TOKEN=seu_client_token
+ZAPI_BASE_URL=https://api.z-api.io
+
+# Groq API Key (opcional - para processamento de IA)
+GROQ_API_KEY=sua_groq_api_key
+
+# Gemini API Key (opcional - para processamento de IA alternativo)
+GEMINI_API_KEY=sua_gemini_api_key
+
+# Twilio (opcional - se não usar Z-API)
+TWILIO_ACCOUNT_SID=seu_account_sid
+TWILIO_AUTH_TOKEN=seu_auth_token
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+

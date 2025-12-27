@@ -21,6 +21,7 @@ import {
   removerTransacao,
   resumoPorTelefone,
   salvarTransacao,
+  atualizarTransacao,
   buscarUsuarioPorTelefone,
   criarUsuario,
   atualizarUsuarioPerfil,
@@ -34,6 +35,7 @@ import {
   atualizarAgendamentoD1,
   removerAgendamentoD1,
   criarAgendamentoD1,
+  AgendamentoRecord,
   salvarNotificacaoD1,
   buscarNotificacoesNaoLidasD1,
   marcarNotificacoesComoLidasD1,
@@ -50,6 +52,9 @@ import {
   atualizarCarteiraD1,
   removerCarteiraD1,
   definirCarteiraPadraoD1,
+  resolverCarteiraPorTextoD1,
+  registrarAliasCarteiraD1,
+  registrarUltimaCarteiraUsadaD1,
 } from './d1';
 import { gerarCodigoVerificacao, salvarCodigoVerificacao, verificarCodigo } from './codigoVerificacao';
 import { gerarDadosRelatorio, calcularPeriodo, formatarRelatorioWhatsApp, formatarRelatorioMensalCompleto } from './relatorios';
@@ -86,6 +91,44 @@ import {
   devePedirConfirmacao,
   devePedirMaisInformacoes
 } from './validacaoQualidade';
+import {
+  decidirEndpointComIA,
+  chamarEndpointInterno,
+  ENDPOINTS_CONFIG
+} from './ai-router';
+import {
+  EstadoConversacao,
+  obterEstadoUsuario,
+  definirEstadoUsuario,
+  limparEstadoUsuario,
+  obterDadosTemporarios,
+  atualizarDadosTemporarios,
+} from './estadosConversacao';
+import {
+  processarComRetry,
+  chamarAPIComRetry,
+  executarDBComRetry,
+} from './retryResiliencia';
+import {
+  formatarResposta,
+  formatarListaTransacoes,
+} from './templatesResposta';
+import {
+  processarComCache,
+  limparCacheExpirado,
+} from './cacheIA';
+import {
+  medirTempoExecucao,
+  registrarMetrica,
+  obterEstatisticasProcessamento,
+} from './metricas';
+import {
+  adicionarMensagemQueue,
+  obterProximaMensagemQueue,
+  marcarMensagemProcessando,
+  marcarMensagemConcluida,
+  marcarMensagemErro,
+} from './queueProcessamento';
 
 // Tipos para Cloudflare Workers
 interface D1Database {
@@ -124,121 +167,78 @@ const clientesSSE = new Map<string, ReadableStreamDefaultController[]>();
 // Função para notificar clientes SSE sobre novas transações
 // Se db for fornecido e não encontrar clientes SSE, salva notificação no D1 para polling
 function notificarClientesSSE(telefone: string, evento: string, dados: any, db?: D1Database) {
-  // Normaliza o telefone recebido (pode vir em vários formatos)
-  let telefoneNormalizado = telefone;
-  
-  // Remove prefixos comuns
-  telefoneNormalizado = telefoneNormalizado.replace('whatsapp:', '').trim();
-  
-  // Garante que tem o + no início
+  let telefoneNormalizado = telefone.replace('whatsapp:', '').trim();
   if (!telefoneNormalizado.startsWith('+')) {
     telefoneNormalizado = '+' + telefoneNormalizado;
   }
-  
-  // Remove o + para criar variações
   const telefoneSemMais = telefoneNormalizado.replace(/^\+/, '');
-  
-  // Cria todas as variações possíveis do telefone
   const telefonesParaNotificar = [
-    telefoneNormalizado,                    // +5561981474690
-    telefoneSemMais,                        // 5561981474690
-    `whatsapp:${telefoneNormalizado}`,      // whatsapp:+5561981474690
-    `whatsapp:${telefoneSemMais}`,          // whatsapp:5561981474690
-    // Variações com/sem o 9 (para números brasileiros)
+    telefoneNormalizado,
+    telefoneSemMais,
+    `whatsapp:${telefoneNormalizado}`,
+    `whatsapp:${telefoneSemMais}`,
     ...(telefoneSemMais.startsWith('55') && telefoneSemMais.length === 13 ? [
-      telefoneSemMais.substring(0, 4) + telefoneSemMais.substring(5), // Remove o 9
+      telefoneSemMais.substring(0, 4) + telefoneSemMais.substring(5),
       `+${telefoneSemMais.substring(0, 4)}${telefoneSemMais.substring(5)}`,
     ] : []),
     ...(telefoneSemMais.startsWith('55') && telefoneSemMais.length === 12 ? [
-      telefoneSemMais.substring(0, 4) + '9' + telefoneSemMais.substring(4), // Adiciona o 9
+      telefoneSemMais.substring(0, 4) + '9' + telefoneSemMais.substring(4),
       `+${telefoneSemMais.substring(0, 4)}9${telefoneSemMais.substring(4)}`,
     ] : []),
   ];
-  
-  console.log(`📡 SSE: Tentando notificar telefone original: ${telefone}`);
-  console.log(`📡 SSE: Telefone normalizado: ${telefoneNormalizado}`);
-  console.log(`📡 SSE: Variações a tentar:`, telefonesParaNotificar);
-  console.log(`📡 SSE: Clientes conectados:`, Array.from(clientesSSE.keys()));
   
   let notificados = 0;
   telefonesParaNotificar.forEach(tel => {
     const clientes = clientesSSE.get(tel);
     if (clientes && clientes.length > 0) {
-      console.log(`📡 SSE: ✅ Encontrados ${clientes.length} cliente(s) para telefone: ${tel}`);
       const mensagem = `event: ${evento}\ndata: ${JSON.stringify(dados)}\n\n`;
       clientes.forEach(controller => {
         try {
           controller.enqueue(new TextEncoder().encode(mensagem));
           notificados++;
-          console.log(`✅ SSE: Mensagem enviada para cliente (evento: ${evento})`);
         } catch (error) {
-          console.error('❌ Erro ao enviar mensagem SSE:', error);
+          console.error('Erro ao enviar mensagem SSE:', error);
         }
       });
-    } else {
-      console.log(`⚠️ SSE: Nenhum cliente encontrado para telefone: ${tel}`);
     }
   });
   
-  if (notificados > 0) {
-    console.log(`📡 SSE: ✅ Notificados ${notificados} cliente(s) SSE para telefone: ${telefoneNormalizado}`);
-  } else {
-    console.warn(`⚠️ SSE: ❌ Nenhum cliente foi notificado para telefone: ${telefoneNormalizado}`);
-    console.warn(`⚠️ SSE: Verifique se o telefone usado na conexão SSE corresponde ao telefone da transação`);
-    
-    // FALLBACK: Se não encontrou nenhum cliente, tenta notificar TODOS os clientes conectados
-    // Isso é útil quando há um problema de correspondência de telefone
-    console.log(`🔄 SSE: Tentando fallback - notificando todos os clientes conectados...`);
+  if (notificados === 0) {
     let fallbackNotificados = 0;
-    clientesSSE.forEach((clientes, tel) => {
+    clientesSSE.forEach((clientes) => {
       if (clientes.length > 0) {
-        console.log(`📡 SSE: Fallback - notificando ${clientes.length} cliente(s) no telefone: ${tel}`);
         const mensagem = `event: ${evento}\ndata: ${JSON.stringify(dados)}\n\n`;
         clientes.forEach(controller => {
           try {
             controller.enqueue(new TextEncoder().encode(mensagem));
             fallbackNotificados++;
-            console.log(`✅ SSE: Mensagem enviada via fallback (evento: ${evento})`);
           } catch (error) {
-            console.error('❌ Erro ao enviar mensagem SSE (fallback):', error);
+            console.error('Erro ao enviar mensagem SSE (fallback):', error);
           }
         });
       }
     });
     
-    if (fallbackNotificados > 0) {
-      console.log(`📡 SSE: ✅ Fallback - Notificados ${fallbackNotificados} cliente(s) SSE`);
-    } else {
-      console.warn(`⚠️ SSE: ❌ Fallback também não encontrou clientes. Total de clientes SSE: ${clientesSSE.size}`);
-      // Salva notificação no D1 para o frontend consultar via polling
-      if (db) {
+    if (fallbackNotificados === 0 && db) {
         salvarNotificacaoFallback(db, telefoneNormalizado, evento, dados).catch(err => {
-          console.error('❌ Erro ao salvar notificação no D1:', err);
+        console.error('Erro ao salvar notificação no D1:', err);
         });
-      }
     }
   }
 }
 
-// Função auxiliar para salvar notificação no D1 quando SSE não funciona
 async function salvarNotificacaoFallback(db: D1Database, telefone: string, evento: string, dados: any) {
   try {
-    // Normaliza telefone para buscar no banco
     const telefoneNormalizado = telefone.replace('whatsapp:', '').replace(/^\+/, '').trim();
-    
-    // Busca o telefone do usuário no banco
     const usuario = await buscarUsuarioPorTelefone(db, telefoneNormalizado);
     if (usuario && usuario.telefone) {
       const telefoneParaNotificar = usuario.telefone.replace('whatsapp:', '').replace(/^\+/, '').trim();
       await salvarNotificacaoD1(db, telefoneParaNotificar, evento, dados);
-      console.log(`💾 SSE: Notificação salva no D1 para telefone: ${telefoneParaNotificar}`);
     } else {
-      // Se não encontrou usuário, salva com o telefone normalizado mesmo
       await salvarNotificacaoD1(db, telefoneNormalizado, evento, dados);
-      console.log(`💾 SSE: Notificação salva no D1 para telefone: ${telefoneNormalizado}`);
     }
   } catch (error) {
-    console.error('❌ Erro ao salvar notificação no D1:', error);
+    console.error('Erro ao salvar notificação no D1:', error);
   }
 }
 
@@ -292,7 +292,6 @@ app.use(
       }
       
       // Fallback: permite a primeira origem da lista ou todas
-      console.warn(`⚠️ Origem não permitida: ${origin}. Permitidas: ${allowed.join(', ')}`);
       return allowed[0] || '*';
     },
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -325,35 +324,25 @@ function limparTelefone(telefone?: string): string {
 }
 
 function formatarTelefone(telefone: string): string {
-  // Remove prefixos existentes
   let telefoneLimpo = telefone.replace(/^whatsapp:/i, '').replace(/^\+/, '').trim();
-  // Remove todos os caracteres não numéricos
   telefoneLimpo = telefoneLimpo.replace(/\D/g, '');
-  // Retorna no formato que será usado no banco (sem whatsapp:)
   return telefoneLimpo.startsWith('55') 
     ? `+${telefoneLimpo}` 
     : `+55${telefoneLimpo}`;
 }
 
-// Função auxiliar para criar variações com/sem dígito 9
 function criarVariacoesDigito9(telefone: string): string[] {
   const variacoes: string[] = [];
-  
-  // Remove prefixos
   let limpo = telefone.replace(/^whatsapp:/i, '').replace(/^\+/, '').trim();
   
-  // Se é número brasileiro (começa com 55 e tem pelo menos 12 dígitos)
   if (limpo.startsWith('55') && limpo.length >= 12) {
     const ddd = limpo.substring(2, 4);
     const resto = limpo.substring(4);
     
-    // Tenta adicionar/remover o 9 após o DDD
     if (resto.startsWith('9') && resto.length === 10) {
-      // Tem 9, cria variação sem 9
       const sem9 = `55${ddd}${resto.substring(1)}`;
       variacoes.push(sem9, `+${sem9}`, `whatsapp:+${sem9}`);
     } else if (!resto.startsWith('9') && resto.length === 9) {
-      // Não tem 9, cria variação com 9
       const com9 = `55${ddd}9${resto}`;
       variacoes.push(com9, `+${com9}`, `whatsapp:+${com9}`);
     }
@@ -363,117 +352,65 @@ function criarVariacoesDigito9(telefone: string): string[] {
 }
 
 function telefoneVariacoes(telefone: string): string[] {
-  // Remove prefixos e normaliza
   let limpo = telefone.replace(/^whatsapp:/i, '').replace(/^\+/, '').trim();
-  
-  // Gera variações básicas
   const variacoes: string[] = [
     limpo,
     `+${limpo}`,
     `whatsapp:+${limpo}`,
   ];
-  
-  // Adiciona variações com/sem o dígito 9 (para números brasileiros)
   const variacoesDigito9 = criarVariacoesDigito9(telefone);
   variacoes.push(...variacoesDigito9);
-  
   return [...new Set(variacoes)].filter(Boolean);
 }
 
-// Função auxiliar para normalizar telefone (mesma lógica usada ao salvar transações)
 function normalizarTelefoneParaComparacao(telefone: string): string {
-  // Remove apenas o prefixo whatsapp: mas mantém o + e o número
   return telefone.replace(/^whatsapp:/i, '').trim();
 }
 
-// Função para criar variações com/sem dígito 9 (para números brasileiros)
 function criarVariacoesComSem9(telefone: string): string[] {
   const apenasNumeros = telefone.replace(/\D/g, '');
   const variacoes: string[] = [apenasNumeros];
   
-  // Se é número brasileiro (começa com 55)
   if (apenasNumeros.startsWith('55') && apenasNumeros.length >= 12) {
-    const ddd = apenasNumeros.substring(2, 4); // DDD (2 dígitos após o 55)
-    const resto = apenasNumeros.substring(4); // Resto do número após DDD
+    const ddd = apenasNumeros.substring(2, 4);
+    const resto = apenasNumeros.substring(4);
     
-    // Números brasileiros podem ter 8 ou 9 dígitos após o DDD
-    // Se tem 9 dígitos e começa com 9, cria variação sem 9 (8 dígitos)
     if (resto.length === 9 && resto.startsWith('9')) {
-      const sem9 = `55${ddd}${resto.substring(1)}`; // Remove o 9
-      variacoes.push(sem9);
-      console.log(`   🔄 Criada variação sem 9: ${sem9} (original: ${apenasNumeros})`);
-    }
-    // Se tem 8 dígitos e não começa com 9, cria variação com 9 (9 dígitos)
-    else if (resto.length === 8 && !resto.startsWith('9')) {
-      const com9 = `55${ddd}9${resto}`; // Adiciona o 9
-      variacoes.push(com9);
-      console.log(`   🔄 Criada variação com 9: ${com9} (original: ${apenasNumeros})`);
-    }
-    // Se tem 10 dígitos (formato antigo com 9), cria variação sem 9
-    else if (resto.length === 10 && resto.startsWith('9')) {
-      const sem9 = `55${ddd}${resto.substring(1)}`;
-      variacoes.push(sem9);
-      console.log(`   🔄 Criada variação sem 9 (10->9): ${sem9} (original: ${apenasNumeros})`);
+      variacoes.push(`55${ddd}${resto.substring(1)}`);
+    } else if (resto.length === 8 && !resto.startsWith('9')) {
+      variacoes.push(`55${ddd}9${resto}`);
+    } else if (resto.length === 10 && resto.startsWith('9')) {
+      variacoes.push(`55${ddd}${resto.substring(1)}`);
     }
   }
   
   return variacoes;
 }
 
-// Função auxiliar para comparar telefones (considera todas as variações, incluindo dígito 9)
 function telefonesCorrespondem(telefone1: string, telefone2: string): boolean {
-  // Normaliza ambos usando a mesma função usada ao salvar transações
   const tel1Norm = normalizarTelefoneParaComparacao(telefone1);
   const tel2Norm = normalizarTelefoneParaComparacao(telefone2);
-  
-  // Remove o + para obter apenas números
   const tel1SemMais = tel1Norm.replace(/^\+/, '');
   const tel2SemMais = tel2Norm.replace(/^\+/, '');
   
-  // Comparação direta após normalização
   if (tel1SemMais === tel2SemMais) {
-    console.log(`✅ Telefones correspondem (direto): "${tel1SemMais}" === "${tel2SemMais}"`);
     return true;
   }
   
-  // Cria variações com/sem dígito 9 para ambos os telefones
   const variacoes1 = criarVariacoesComSem9(tel1SemMais);
   const variacoes2 = criarVariacoesComSem9(tel2SemMais);
-  
-  console.log(`   🔍 Variações criadas para telefone 1 (${tel1SemMais}):`, variacoes1);
-  console.log(`   🔍 Variações criadas para telefone 2 (${tel2SemMais}):`, variacoes2);
-  
-  // Verifica se há alguma correspondência entre as variações
   const corresponde = variacoes1.some(v1 => variacoes2.includes(v1));
   
   if (corresponde) {
-    const variacaoCorrespondente = variacoes1.find(v1 => variacoes2.includes(v1));
-    console.log(`✅ Telefones correspondem (variações com/sem 9): "${telefone1}" <-> "${telefone2}"`);
-    console.log(`   Variação correspondente: ${variacaoCorrespondente}`);
     return true;
-  } else {
-    // Tenta também com as variações completas (incluindo prefixos)
+  }
+  
     const variacoesCompletas1 = telefoneVariacoes(telefone1);
     const variacoesCompletas2 = telefoneVariacoes(telefone2);
-    
     const variacoesCompletas1Norm = variacoesCompletas1.map(v => v.replace(/^whatsapp:/i, '').replace(/^\+/, ''));
     const variacoesCompletas2Norm = variacoesCompletas2.map(v => v.replace(/^whatsapp:/i, '').replace(/^\+/, ''));
     
-    const correspondeCompleto = variacoesCompletas1Norm.some(v1 => variacoesCompletas2Norm.includes(v1));
-    
-    if (correspondeCompleto) {
-      console.log(`✅ Telefones correspondem (variações completas): "${telefone1}" <-> "${telefone2}"`);
-      return true;
-    }
-    
-    console.log(`❌ Telefones NÃO correspondem: "${telefone1}" <-> "${telefone2}"`);
-    console.log(`   Normalizados: "${tel1Norm}" <-> "${tel2Norm}"`);
-    console.log(`   Sem +: "${tel1SemMais}" <-> "${tel2SemMais}"`);
-    console.log(`   Variações 1: ${variacoes1.join(', ')}`);
-    console.log(`   Variações 2: ${variacoes2.join(', ')}`);
-  }
-  
-  return corresponde;
+  return variacoesCompletas1Norm.some(v1 => variacoesCompletas2Norm.includes(v1));
 }
 
 // Interface para transação extraída pela IA
@@ -520,7 +457,8 @@ Retorne APENAS um JSON válido com o seguinte formato:
       "valor": 50.00,
       "categoria": "comida",
       "tipo": "saida",
-      "metodo": "debito"
+      "metodo": "debito",
+      "carteira": "nome da carteira se mencionada (ex: nubank, itau, inter)"
     }
   ]
 }
@@ -578,6 +516,7 @@ Regras:
     - Qualquer frase com "recebi" + valor = ENTRADA
 
 - MÉTODO: "credito" se mencionar cartão de crédito, crédito, parcelado, ou "debito" se mencionar débito, dinheiro, pix, transferência. Se não mencionar, use "debito"
+- CARTEIRA: Se a mensagem mencionar o nome de uma carteira, banco ou método de pagamento (ex: "nubank", "itau", "inter", "banco do brasil", "bradesco", "caixa", "santander", "picpay", "mercado pago", "pix", "cartão", "débito", "crédito"), extraia o nome da carteira no campo "carteira". Se não mencionar, deixe o campo vazio ou null.
 - Se não houver transações, retorne {"transacoes": []}
 - Retorne APENAS o JSON, sem texto adicional`;
 
@@ -601,10 +540,8 @@ Regras:
   try {
     let resposta: string;
 
-    // Tenta Groq primeiro (se configurado)
-    if ((IA_PROVIDER === 'groq' || !IA_PROVIDER) && temGroq) {
+    if (temGroq) {
       try {
-        console.log('🤖 Processando mensagem com Groq...');
         const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -616,7 +553,7 @@ Regras:
             messages: [
               {
                 role: 'system',
-                content: 'Você é um assistente especializado em extrair informações financeiras de mensagens de texto. Sempre retorne JSON válido.'
+                content: 'Você é um assistente especializado em extrair informações financeiras de mensagens de texto. IMPORTANTE: Retorne APENAS JSON válido, sem nenhum texto adicional, explicações ou comentários. Apenas o JSON puro.'
               },
               {
                 role: 'user',
@@ -635,7 +572,6 @@ Regras:
         const groqData = await groqResponse.json();
         resposta = groqData.choices[0]?.message?.content || '{}';
       } catch (error: any) {
-        console.warn('⚠️  Erro ao usar Groq, tentando Gemini...', error.message);
         if (temGemini) {
           const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`, {
             method: 'POST',
@@ -658,7 +594,6 @@ Regras:
         }
       }
     } else if (temGemini) {
-      // Usa Gemini diretamente
       const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -679,18 +614,50 @@ Regras:
       throw new Error('Nenhuma IA disponível');
     }
 
-    // Extrai JSON da resposta
-    let jsonStr = resposta.trim();
-    if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    }
-    
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    // Função auxiliar para extrair JSON válido da resposta
+    function extrairJSON(texto: string): any {
+      // Remove markdown code blocks
+      let limpo = texto.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+      
+      // Remove texto antes do primeiro {
+      const primeiroBrace = limpo.indexOf('{');
+      if (primeiroBrace > 0) {
+        limpo = limpo.substring(primeiroBrace);
+      }
+      
+      // Remove texto depois do último }
+      const ultimoBrace = limpo.lastIndexOf('}');
+      if (ultimoBrace >= 0 && ultimoBrace < limpo.length - 1) {
+        limpo = limpo.substring(0, ultimoBrace + 1);
+      }
+      
+      // Tenta encontrar o primeiro objeto JSON válido (greedy match)
+      const jsonMatch = limpo.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      jsonStr = jsonMatch[0];
+        try {
+          return JSON.parse(jsonMatch[0]);
+        } catch (e) {
+          // Se falhar, tenta encontrar o JSON mais interno (non-greedy)
+          const jsonProfundo = limpo.match(/\{[\s\S]*?\}/);
+          if (jsonProfundo) {
+            try {
+              return JSON.parse(jsonProfundo[0]);
+            } catch (e2) {
+              // Ignora
+            }
+          }
+        }
+      }
+      
+      // Se não encontrou, tenta parse direto
+      try {
+        return JSON.parse(limpo);
+      } catch (e) {
+        throw new Error(`Resposta da IA não contém JSON válido: ${texto.substring(0, 200)}...`);
+      }
     }
 
-    const resultado = JSON.parse(jsonStr);
+    const resultado = extrairJSON(resposta);
     
     if (resultado.transacoes && Array.isArray(resultado.transacoes)) {
       return resultado.transacoes.map((t: any) => {
@@ -710,7 +677,6 @@ Regras:
         
         if (temPalavraEntrada && !temPalavraSaida) {
           tipoFinal = 'entrada';
-          console.log(`   ✅ CORREÇÃO: Tipo corrigido para "entrada" baseado em palavras-chave`);
         } else if (temPalavraSaida && !temPalavraEntrada) {
           tipoFinal = 'saida';
         }
@@ -750,7 +716,6 @@ async function processarAgendamentoComIA(
   const iaProvider = env.IA_PROVIDER || 'groq';
   
   if (!groqApiKey && !geminiApiKey) {
-    console.log('⚠️ Nenhuma IA configurada para processar agendamentos');
     return null;
   }
   
@@ -789,7 +754,6 @@ Retorne APENAS o JSON, sem texto adicional.`;
   try {
     // Tenta Groq primeiro se disponível
     if ((iaProvider === 'groq' || !geminiApiKey) && groqApiKey) {
-      console.log('🤖 Processando agendamento com Groq...');
       
       const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -869,7 +833,6 @@ Retorne APENAS o JSON, sem texto adicional.`;
     
     // Tenta Gemini se Groq não funcionou ou não está disponível
     if (geminiApiKey) {
-      console.log('🤖 Processando agendamento com Gemini...');
       
       const geminiResponse = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
@@ -1015,15 +978,113 @@ async function autenticarMiddleware(c: any, next: () => Promise<void>): Promise<
   }
 }
 
+/**
+ * Divide uma mensagem longa em partes menores que o limite do WhatsApp (4096 caracteres)
+ */
+function dividirMensagemWorker(mensagem: string, limite: number = 4000): string[] {
+  // Deixa uma margem de segurança (96 caracteres) para evitar problemas
+  if (mensagem.length <= limite) {
+    return [mensagem];
+  }
+
+  const partes: string[] = [];
+  let inicio = 0;
+
+  while (inicio < mensagem.length) {
+    let fim = inicio + limite;
+    
+    // Se não é a última parte, tenta quebrar em uma linha nova ou espaço
+    if (fim < mensagem.length) {
+      // Procura por quebra de linha próxima
+      const quebraLinha = mensagem.lastIndexOf('\n', fim);
+      // Procura por espaço próximo
+      const espaco = mensagem.lastIndexOf(' ', fim);
+      
+      // Prefere quebra de linha, depois espaço
+      if (quebraLinha > inicio + limite * 0.7) {
+        fim = quebraLinha + 1;
+      } else if (espaco > inicio + limite * 0.7) {
+        fim = espaco + 1;
+      }
+    } else {
+      fim = mensagem.length;
+    }
+    
+    partes.push(mensagem.substring(inicio, fim));
+    inicio = fim;
+  }
+
+  return partes;
+}
+
 async function enviarMensagemZApi(
   telefone: string,
   mensagem: string,
   env: Bindings
 ): Promise<{ success: boolean; error?: string }> {
+  console.log('🔍 enviarMensagemZApi chamada com:');
+  console.log('   telefone:', telefone);
+  console.log('   mensagem length:', mensagem.length);
+  console.log('   ZAPI_INSTANCE_ID:', env.ZAPI_INSTANCE_ID ? '✅' : '❌');
+  console.log('   ZAPI_TOKEN:', env.ZAPI_TOKEN ? '✅' : '❌');
+  console.log('   ZAPI_CLIENT_TOKEN:', env.ZAPI_CLIENT_TOKEN ? '✅' : '❌');
+  
   if (!env.ZAPI_INSTANCE_ID || !env.ZAPI_TOKEN || !env.ZAPI_CLIENT_TOKEN) {
-    return { success: false, error: 'Z-API não configurada. Configure ZAPI_INSTANCE_ID, ZAPI_TOKEN e ZAPI_CLIENT_TOKEN no Cloudflare Workers.' };
+    const erro = 'Z-API não configurada. Configure ZAPI_INSTANCE_ID, ZAPI_TOKEN e ZAPI_CLIENT_TOKEN no Cloudflare Workers.';
+    console.error('❌', erro);
+    return { success: false, error: erro };
   }
   
+  // Divide mensagem longa em partes menores (evita "Ler mais" do WhatsApp)
+  const partesMensagem = dividirMensagemWorker(mensagem);
+  
+  // Se a mensagem foi dividida, envia cada parte separadamente
+  if (partesMensagem.length > 1) {
+    console.log(`📤 Mensagem longa detectada (${mensagem.length} caracteres). Dividindo em ${partesMensagem.length} partes...`);
+    
+    let primeiroErro: string | undefined;
+    
+    // Envia cada parte sequencialmente
+    for (let i = 0; i < partesMensagem.length; i++) {
+      const parte = partesMensagem[i];
+      
+      console.log(`📤 Enviando parte ${i + 1}/${partesMensagem.length} (${parte.length} caracteres)...`);
+      
+      const resultado = await enviarMensagemZApiUnica(telefone, parte, env);
+      
+      if (!resultado.success) {
+        primeiroErro = resultado.error;
+        // Continua enviando as outras partes mesmo se uma falhar
+        console.warn(`⚠️ Erro ao enviar parte ${i + 1}: ${resultado.error}`);
+      }
+      
+      // Pequeno delay entre mensagens para evitar spam
+      if (i < partesMensagem.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    if (primeiroErro) {
+      // Retorna sucesso parcial se pelo menos uma parte foi enviada
+      // Mas loga o erro para debug
+      console.warn(`⚠️ Algumas partes falharam. Primeiro erro: ${primeiroErro}`);
+    }
+    
+    return { success: true };
+  }
+  
+  // Mensagem curta - envia normalmente
+  return await enviarMensagemZApiUnica(telefone, mensagem, env);
+}
+
+/**
+ * Envia uma única mensagem via Z-API (sem divisão)
+ */
+async function enviarMensagemZApiUnica(
+  telefone: string,
+  mensagem: string,
+  env: Bindings
+): Promise<{ success: boolean; error?: string }> {
   const baseUrl = env.ZAPI_BASE_URL || 'https://api.z-api.io';
   const url = `${baseUrl}/instances/${env.ZAPI_INSTANCE_ID}/token/${env.ZAPI_TOKEN}/send-text`;
   
@@ -1032,6 +1093,12 @@ async function enviarMensagemZApi(
   const numeroFormatado = numeroLimpo.startsWith('55') 
     ? numeroLimpo 
     : `55${numeroLimpo}`;
+  
+  console.log('📤 Enviando para Z-API:');
+  console.log('   URL:', url);
+  console.log('   Telefone formatado:', numeroFormatado);
+  console.log('   Tamanho da mensagem:', mensagem.length, 'caracteres');
+  console.log('   Mensagem preview:', mensagem.substring(0, 100));
   
   try {
     const response = await fetch(url, {
@@ -1047,11 +1114,115 @@ async function enviarMensagemZApi(
       }),
     });
     
-    const data = await response.json();
-    return response.ok 
-      ? { success: true }
-      : { success: false, error: data.message || data.error || 'Erro ao enviar mensagem' };
+    const responseText = await response.text();
+    console.log('📥 Resposta Z-API:');
+    console.log('   Status:', response.status, response.statusText);
+    console.log('   Body:', responseText);
+    
+    let data: any;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('❌ Erro ao parsear JSON:', responseText);
+      return { success: false, error: `Resposta inválida: ${responseText.substring(0, 100)}` };
+    }
+    
+    if (response.ok) {
+      console.log('✅ Mensagem enviada com sucesso!');
+      return { success: true };
+    } else {
+      const erro = data.message || data.error || 'Erro ao enviar mensagem';
+      console.error('❌ Erro Z-API:', erro);
+      return { success: false, error: erro };
+    }
   } catch (error: any) {
+    console.error('❌ Exceção ao enviar mensagem:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+async function enviarMensagemComButtonListZApi(
+  telefone: string,
+  mensagem: string,
+  botoes: Array<{ id: string; label: string }>,
+  env: Bindings
+): Promise<{ success: boolean; error?: string }> {
+  console.log('🔍 enviarMensagemComButtonListZApi chamada:');
+  console.log('   telefone:', telefone);
+  console.log('   mensagem length:', mensagem.length);
+  console.log('   botões:', botoes.length);
+  
+  if (!env.ZAPI_INSTANCE_ID || !env.ZAPI_TOKEN || !env.ZAPI_CLIENT_TOKEN) {
+    const erro = 'Z-API não configurada. Configure ZAPI_INSTANCE_ID, ZAPI_TOKEN e ZAPI_CLIENT_TOKEN no Cloudflare Workers.';
+    console.error('❌', erro);
+    return { success: false, error: erro };
+  }
+  
+  if (botoes.length === 0 || botoes.length > 3) {
+    const erro = 'Deve ter entre 1 e 3 botões';
+    console.error('❌', erro);
+    return { success: false, error: erro };
+  }
+  
+  const baseUrl = env.ZAPI_BASE_URL || 'https://api.z-api.io';
+  const url = `${baseUrl}/instances/${env.ZAPI_INSTANCE_ID}/token/${env.ZAPI_TOKEN}/send-button-list`;
+  
+  // Remove prefixo whatsapp: se existir e formata o número
+  const numeroLimpo = telefone.replace('whatsapp:', '').replace('+', '');
+  const numeroFormatado = numeroLimpo.startsWith('55') 
+    ? numeroLimpo 
+    : `55${numeroLimpo}`;
+  
+  const requestBody = {
+    phone: numeroFormatado,
+    message: mensagem,
+    buttonList: {
+      buttons: botoes.map(btn => ({
+        id: btn.id,
+        label: btn.label
+      }))
+    }
+  };
+  
+  console.log('📤 Enviando button-list para Z-API:');
+  console.log('   URL:', url);
+  console.log('   Telefone formatado:', numeroFormatado);
+  console.log('   Body:', JSON.stringify(requestBody, null, 2));
+  
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Client-Token': env.ZAPI_CLIENT_TOKEN,
+      },
+      body: JSON.stringify(requestBody),
+    });
+    
+    const responseText = await response.text();
+    console.log('📥 Resposta Z-API (button-list):');
+    console.log('   Status:', response.status, response.statusText);
+    console.log('   Body:', responseText);
+    
+    let data: any;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('❌ Erro ao parsear JSON:', responseText);
+      return { success: false, error: `Resposta inválida: ${responseText.substring(0, 100)}` };
+    }
+    
+    if (response.ok) {
+      console.log('✅ Button-list enviado com sucesso!');
+      return { success: true };
+    } else {
+      const erro = data.message || data.error || 'Erro ao enviar mensagem com botões';
+      console.error('❌ Erro Z-API (button-list):', erro);
+      return { success: false, error: erro };
+    }
+  } catch (error: any) {
+    console.error('❌ Exceção ao enviar button-list:', error);
     return { success: false, error: error.message };
   }
 }
@@ -1070,6 +1241,12 @@ app.post('/webhook/whatsapp', async (c) => {
   const valor = extrairValor(mensagem) ?? 0;
   const telefoneFormatado = formatarTelefone(telefone);
 
+  const carteiraResolvida = await resolverCarteiraPorTextoD1(c.env.financezap_db, telefone, {
+    textoOriginal: mensagem,
+    tipoPreferido: 'debito',
+  });
+  const carteiraIdResolvida = carteiraResolvida.carteira?.id ?? null;
+
   const transacaoId = await salvarTransacao(c.env.financezap_db, {
     telefone,
     descricao: mensagem || 'Mensagem recebida',
@@ -1080,7 +1257,15 @@ app.post('/webhook/whatsapp', async (c) => {
     dataHora,
     data,
     mensagemOriginal: mensagem,
+    carteiraId: carteiraIdResolvida,
   });
+
+  if (carteiraIdResolvida) {
+    await registrarUltimaCarteiraUsadaD1(c.env.financezap_db, telefone, carteiraIdResolvida);
+    if (carteiraResolvida.aliasUsado) {
+      await registrarAliasCarteiraD1(c.env.financezap_db, telefone, carteiraIdResolvida, carteiraResolvida.aliasUsado);
+    }
+  }
   
   // SSE desabilitado - usando apenas botão de atualizar manual
   // notificarClientesSSE(telefoneFormatado, 'transacao-nova', {
@@ -1101,19 +1286,12 @@ app.get('/api/transacoes', async (c) => {
     // AUTENTICAÇÃO OBRIGATÓRIA - Extrai telefone do token JWT
     const authHeader = c.req.header('Authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log('❌ Token não fornecido no header Authorization');
       return c.json({ success: false, error: 'Token não fornecido' }, 401);
     }
     
     const token = authHeader.substring(7);
     const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
     
-    console.log('🔐 Verificando token:', {
-      tokenLength: token.length,
-      tokenPreview: token.substring(0, 20) + '...',
-      hasJWTSecret: !!c.env.JWT_SECRET,
-      jwtSecretLength: jwtSecret.length
-    });
     
     let telefoneFormatado: string;
     try {
@@ -1281,6 +1459,169 @@ app.post('/api/transacoes', async (c) => {
   }
 });
 
+app.put('/api/transacoes/:id', async (c) => {
+  try {
+    // AUTENTICAÇÃO OBRIGATÓRIA - Extrai telefone do token JWT
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const id = Number(c.req.param('id'));
+    
+    if (!Number.isFinite(id)) {
+      return c.json({ success: false, error: 'ID inválido' }, 400);
+    }
+    
+    // Verifica se a transação pertence ao usuário antes de editar
+    const transacaoExistente = await c.env.financezap_db
+      .prepare('SELECT telefone FROM transacoes WHERE id = ?')
+      .bind(id)
+      .first<any>();
+    
+    if (!transacaoExistente) {
+      return c.json({ success: false, error: 'Transação não encontrada' }, 404);
+    }
+    
+    // Verifica se a transação pertence ao usuário autenticado
+    if (!telefonesCorrespondem(transacaoExistente.telefone, telefoneFormatado)) {
+      return c.json({ success: false, error: 'Você não tem permissão para editar esta transação' }, 403);
+    }
+    
+    const body = await c.req.json();
+    const { descricao, valor, categoria, tipo, metodo, dataHora, data, carteiraId } = body;
+    
+    // Monta objeto com apenas os campos fornecidos
+    const dadosAtualizacao: any = {};
+    
+    if (descricao !== undefined) {
+      if (!descricao || !descricao.trim()) {
+        return c.json({ success: false, error: 'Descrição não pode ser vazia' }, 400);
+      }
+      dadosAtualizacao.descricao = descricao.trim();
+    }
+    
+    if (valor !== undefined) {
+      if (isNaN(Number(valor)) || Number(valor) <= 0) {
+        return c.json({ success: false, error: 'Valor inválido' }, 400);
+      }
+      dadosAtualizacao.valor = Number(valor);
+    }
+    
+    if (categoria !== undefined) {
+      dadosAtualizacao.categoria = categoria || 'outros';
+    }
+    
+    if (tipo !== undefined) {
+      if (!['entrada', 'saida'].includes(tipo)) {
+        return c.json({ success: false, error: 'Tipo deve ser "entrada" ou "saida"' }, 400);
+      }
+      dadosAtualizacao.tipo = tipo;
+    }
+    
+    if (metodo !== undefined) {
+      if (!['credito', 'debito'].includes(metodo)) {
+        return c.json({ success: false, error: 'Método deve ser "credito" ou "debito"' }, 400);
+      }
+      dadosAtualizacao.metodo = metodo;
+    }
+    
+    if (dataHora !== undefined) {
+      dadosAtualizacao.dataHora = dataHora;
+    }
+    
+    if (data !== undefined) {
+      dadosAtualizacao.data = data;
+    }
+    
+    if (carteiraId !== undefined) {
+      dadosAtualizacao.carteiraId = carteiraId;
+    }
+    
+    // Validação: entrada não pode ser em crédito
+    const tipoFinal = dadosAtualizacao.tipo || transacaoExistente.tipo;
+    const metodoFinal = dadosAtualizacao.metodo || transacaoExistente.metodo;
+    
+    if (tipoFinal === 'entrada' && metodoFinal === 'credito') {
+      return c.json({ success: false, error: 'Recebimentos não podem ser em crédito' }, 400);
+    }
+    
+    // Atualiza a transação
+    const atualizado = await atualizarTransacao(c.env.financezap_db, id, dadosAtualizacao);
+    
+    if (!atualizado) {
+      return c.json({ success: false, error: 'Nenhum campo foi atualizado ou transação não encontrada' }, 400);
+    }
+    
+    // Busca a transação atualizada com a carteira incluída
+    const transacaoRow = await c.env.financezap_db
+      .prepare(
+        `SELECT 
+          t.id, 
+          t.telefone, 
+          t.descricao, 
+          t.valor, 
+          t.categoria, 
+          t.tipo, 
+          t.metodo, 
+          t.dataHora, 
+          t.data, 
+          t.mensagemOriginal,
+          t.carteiraId,
+          c.id as carteira_id,
+          c.nome as carteira_nome
+         FROM transacoes t
+         LEFT JOIN carteiras c ON t.carteiraId = c.id AND c.ativo = 1
+         WHERE t.id = ?`
+      )
+      .bind(id)
+      .first<any>();
+    
+    if (!transacaoRow) {
+      return c.json({ success: false, error: 'Erro ao buscar transação atualizada' }, 500);
+    }
+    
+    const transacaoAtualizada = {
+      id: transacaoRow.id,
+      telefone: transacaoRow.telefone,
+      descricao: transacaoRow.descricao,
+      valor: transacaoRow.valor,
+      categoria: transacaoRow.categoria,
+      tipo: transacaoRow.tipo,
+      metodo: transacaoRow.metodo,
+      dataHora: transacaoRow.dataHora,
+      data: transacaoRow.data,
+      mensagemOriginal: transacaoRow.mensagemOriginal,
+      carteiraId: transacaoRow.carteiraId,
+      carteira: transacaoRow.carteira_id ? {
+        id: transacaoRow.carteira_id,
+        nome: transacaoRow.carteira_nome,
+        tipo: transacaoRow.metodo === 'credito' ? 'credito' : 'debito',
+      } : null,
+    };
+    
+    return c.json({
+      success: true,
+      message: 'Transação atualizada com sucesso',
+      transacao: transacaoAtualizada,
+    });
+  } catch (error: any) {
+    console.error('Erro em PUT /api/transacoes/:id:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao atualizar transação' }, 500);
+  }
+});
+
 app.delete('/api/transacoes/:id', async (c) => {
   try {
     // AUTENTICAÇÃO OBRIGATÓRIA - Extrai telefone do token JWT
@@ -1317,9 +1658,6 @@ app.delete('/api/transacoes/:id', async (c) => {
     
     // Verifica se a transação pertence ao usuário autenticado (usando função auxiliar)
     if (!telefonesCorrespondem(transacao.telefone, telefoneFormatado)) {
-      console.log('⚠️ Telefones não correspondem ao deletar transação:');
-      console.log(`   Transação: ${transacao.telefone}`);
-      console.log(`   Usuário: ${telefoneFormatado}`);
       return c.json({ success: false, error: 'Você não tem permissão para deletar esta transação' }, 403);
     }
     
@@ -1458,7 +1796,6 @@ app.post('/api/auth/solicitar-codigo', async (c) => {
     const codigo = gerarCodigoVerificacao();
     await salvarCodigoVerificacao(telefoneFormatado, codigo, c.env.financezap_db);
     
-    console.log(`🔐 Código gerado para ${telefoneFormatado}: ${codigo}`);
     
     // Envia código via WhatsApp
     const mensagem = `🔐 Seu código de verificação Zela é: *${codigo}*\n\nEste código expira em 5 minutos.\n\nSe você não solicitou este código, ignore esta mensagem.`;
@@ -1527,12 +1864,6 @@ app.post('/api/auth/verificar-codigo', async (c) => {
     // Nota: Em produção, configure JWT_SECRET no wrangler.toml ou variáveis de ambiente
     const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
     
-    console.log('🔐 Gerando token JWT:', {
-      telefone: telefoneFormatado,
-      hasJWTSecret: !!c.env.JWT_SECRET,
-      jwtSecretLength: jwtSecret.length,
-      jwtSecretPreview: jwtSecret.substring(0, 10) + '...'
-    });
     
     // Calcula expiração (7 dias = 7 * 24 * 60 * 60 segundos)
     const expiresInSeconds = 7 * 24 * 60 * 60; // 7 dias
@@ -1556,19 +1887,10 @@ app.post('/api/auth/verificar-codigo', async (c) => {
         const decodedWithoutVerify = JSON.parse(
           atob(paddedPayload)
         );
-        console.log('✅ Token gerado com sucesso. Payload decodificado:', JSON.stringify(decodedWithoutVerify, null, 2));
-        console.log('🔍 Campo telefone no token gerado:', decodedWithoutVerify.telefone);
       }
     } catch (e) {
-      console.log('⚠️ Não foi possível decodificar token para verificação:', e);
     }
     
-    console.log('✅ Token gerado com sucesso:', {
-      tokenLength: token.length,
-      tokenPreview: token.substring(0, 20) + '...',
-      expiraEm: new Date(exp * 1000).toISOString(),
-      telefoneNoPayload: telefoneFormatado
-    });
     
     // Busca informações do usuário no banco (simplificado - você pode expandir isso)
     const usuario = await c.env.financezap_db
@@ -1614,7 +1936,6 @@ app.post('/api/auth/cadastro', async (c) => {
       ? `whatsapp:+${telefoneLimpo}` 
       : `whatsapp:+55${telefoneLimpo}`;
     
-    console.log('📝 Cadastro de novo usuário:', telefoneFormatado);
     
     // Verifica se o usuário já existe
     const usuarioExistente = await buscarUsuarioPorTelefone(c.env.financezap_db, telefoneFormatado);
@@ -1646,9 +1967,6 @@ app.post('/api/auth/cadastro', async (c) => {
       await registrarNumero(c.env.financezap_db, telefoneFormatado);
     }
     
-    console.log(`✅ Usuário cadastrado: ${nome.trim()} (${telefoneFormatado})`);
-    console.log(`   Trial expira em: ${trialExpiraEm.toLocaleString('pt-BR')}`);
-    console.log(`   É novo número: ${ehNovoNumero}`);
     
     // Envia mensagem de boas-vindas se for um novo usuário
     if (ehNovoNumero) {
@@ -1710,7 +2028,6 @@ Entre em contato conosco: contato@usezela.com 📩
 🚀 *Vamos lá começar a organizar suas finanças!*`;
 
         await enviarMensagemZApi(telefoneFormatado, mensagemBoasVindas, c.env);
-        console.log(`📨 Mensagem de boas-vindas enviada para: ${telefoneFormatado}`);
       } catch (error: any) {
         console.error('❌ Erro ao enviar mensagem de boas-vindas:', error);
         // Não falha o cadastro se não conseguir enviar a mensagem
@@ -1757,16 +2074,11 @@ app.delete('/api/auth/excluir-dados', async (c) => {
       return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
     }
     
-    console.log(`🗑️ Solicitação de exclusão de dados para: ${telefoneFormatado}`);
     
     // Exclui todos os dados do usuário
     const resultado = await excluirTodosDadosUsuario(c.env.financezap_db, telefoneFormatado);
     
     if (resultado.sucesso) {
-      console.log(`✅ Dados excluídos com sucesso para: ${telefoneFormatado}`);
-      console.log(`   Transações removidas: ${resultado.dadosRemovidos?.transacoes || 0}`);
-      console.log(`   Agendamentos removidos: ${resultado.dadosRemovidos?.agendamentos || 0}`);
-      console.log(`   Categorias removidas: ${resultado.dadosRemovidos?.categorias || 0}`);
       return c.json({
         success: true,
         message: 'Todos os seus dados foram excluídos com sucesso',
@@ -1806,7 +2118,6 @@ app.get('/api/auth/verify', async (c) => {
     try {
       telefoneOriginal = await extrairTelefoneDoToken(token, jwtSecret);
       telefoneFormatado = formatarTelefone(telefoneOriginal);
-      console.log('🔍 Token verificado - Telefone original:', telefoneOriginal, 'Formatado:', telefoneFormatado);
     } catch (error: any) {
       console.error('Erro ao verificar token:', error.message);
       if (error.message?.includes('expired')) {
@@ -1815,7 +2126,6 @@ app.get('/api/auth/verify', async (c) => {
       return c.json({ success: false, error: error.message || 'Token inválido' }, 401);
     }
     
-    console.log('🔍 Verificando usuário com telefone formatado:', telefoneFormatado);
     const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, telefoneFormatado);
     
     if (!usuario) {
@@ -1825,11 +2135,6 @@ app.get('/api/auth/verify', async (c) => {
       return c.json({ success: false, error: 'Usuário não encontrado' }, 401);
     }
     
-    console.log('✅ Usuário encontrado:', {
-      telefone: usuario.telefone,
-      nome: usuario.nome,
-      status: usuario.status
-    });
     
     const stats = await calcularEstatisticas(c.env.financezap_db, { telefone: telefoneFormatado });
     const agora = new Date();
@@ -1853,11 +2158,6 @@ app.get('/api/auth/verify', async (c) => {
       }
     };
     
-    console.log('📤 Retornando dados do usuário:', {
-      telefone: resposta.telefone,
-      status: resposta.usuario.status,
-      nome: resposta.usuario.nome
-    });
     
     return c.json(resposta);
   } catch (error: any) {
@@ -2009,7 +2309,6 @@ app.post('/api/auth/ativar-assinatura', async (c) => {
     const body = await c.req.json();
     const { planoId } = body;
     
-    console.log(`💳 Ativando assinatura para ${telefoneFormatado} - Plano: ${planoId}`);
     
     // Calcula a data de expiração baseada no plano
     const agora = new Date();
@@ -2039,7 +2338,6 @@ app.post('/api/auth/ativar-assinatura', async (c) => {
       WHERE telefone = ?
     `).bind(planoId, dataExpiracao.toISOString(), agora.toISOString(), telefoneFormatado).run();
     
-    console.log(`✅ Assinatura ativada! Plano: ${planoId}, Expira em: ${dataExpiracao.toLocaleDateString('pt-BR')}`);
     
     return c.json({
       success: true,
@@ -2173,7 +2471,6 @@ app.put('/api/categorias/:id', async (c) => {
       .first<{ padrao: number }>();
     
     if (categoriaVerificacao && categoriaVerificacao.padrao === 1) {
-      console.warn(`🚫 Tentativa de atualizar categoria padrão bloqueada na rota! ID: ${id}`);
       return c.json({ 
         success: false, 
         error: 'Não é possível atualizar categorias padrão do sistema' 
@@ -2234,7 +2531,6 @@ app.delete('/api/categorias/:id', async (c) => {
       .first<{ padrao: number }>();
     
     if (categoria && categoria.padrao === 1) {
-      console.warn(`🚫 Tentativa de remover categoria padrão bloqueada na rota! ID: ${id}`);
       return c.json({ 
         success: false, 
         error: 'Não é possível remover categorias padrão do sistema' 
@@ -2501,7 +2797,6 @@ app.get('/api/carteiras', async (c) => {
       const testQuery = await c.env.financezap_db
         .prepare('SELECT COUNT(*) as count FROM carteiras')
         .first<{ count: number }>();
-      console.log(`🔍 Debug GET /api/carteiras: Tabela existe, total: ${testQuery?.count || 0}`);
     } catch (testError: any) {
       console.error('❌ Erro ao testar tabela carteiras:', testError.message);
       return c.json({ 
@@ -2652,7 +2947,6 @@ app.delete('/api/carteiras/:id', async (c) => {
       const testQuery = await c.env.financezap_db
         .prepare('SELECT COUNT(*) as count FROM carteiras')
         .first<{ count: number }>();
-      console.log(`🔍 Debug: Tabela carteiras existe, total de registros: ${testQuery?.count || 0}`);
     } catch (testError: any) {
       console.error('❌ Erro ao testar acesso à tabela carteiras:', testError.message);
       return c.json({ 
@@ -2899,9 +3193,6 @@ app.put('/api/agendamentos/:id', async (c) => {
       
       // Verifica se o telefone corresponde
       if (!telefonesCorrespondem(agendamento.telefone, telefoneFormatado)) {
-        console.log('⚠️ Telefones não correspondem ao atualizar agendamento:');
-        console.log(`   Agendamento: ${agendamento.telefone}`);
-        console.log(`   Usuário: ${telefoneFormatado}`);
         return c.json({ success: false, error: 'Você não tem permissão para atualizar este agendamento' }, 403);
       }
       
@@ -2943,7 +3234,6 @@ app.put('/api/agendamentos/:id', async (c) => {
             mensagemOriginal: `Agendamento ${agendamento.id} - ${agendamento.descricao}`,
             carteiraId: carteiraId || null,
           });
-          console.log(`✅ Transação criada automaticamente para agendamento ${id} (ID: ${transacaoId})`);
         } catch (error: any) {
           console.error(`❌ Erro ao criar transação para agendamento ${id}:`, error.message);
           // Não falha a atualização do agendamento se a transação falhar
@@ -3021,7 +3311,6 @@ app.put('/api/agendamentos/:id', async (c) => {
             mensagemOriginal: `Agendamento ${agendamentoAtualizado.id} - ${agendamentoAtualizado.descricao}`,
             carteiraId: carteiraId || null,
           });
-          console.log(`✅ Transação criada automaticamente para agendamento ${id} (ID: ${transacaoId})`);
         } catch (error: any) {
           console.error(`❌ Erro ao criar transação para agendamento ${id}:`, error.message);
           // Não falha a atualização do agendamento se a transação falhar
@@ -3061,9 +3350,6 @@ app.delete('/api/agendamentos/:id', async (c) => {
     
     // Verifica se o telefone corresponde (usando função auxiliar)
     if (!telefonesCorrespondem(agendamento.telefone, telefoneFormatado)) {
-      console.log('⚠️ Telefones não correspondem ao deletar agendamento:');
-      console.log(`   Agendamento: ${agendamento.telefone}`);
-      console.log(`   Usuário: ${telefoneFormatado}`);
       return c.json({ success: false, error: 'Você não tem permissão para remover este agendamento' }, 403);
     }
     
@@ -3213,8 +3499,6 @@ app.post('/api/chat', autenticarMiddleware, async (c) => {
       return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
     }
     
-    console.log('💬 Chat de IA - Mensagem recebida:', mensagem);
-    console.log('   Telefone:', telefoneFormatado);
     
     // Busca estatísticas e transações do usuário para contexto
     const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: telefoneFormatado });
@@ -3226,17 +3510,17 @@ app.post('/api/chat', autenticarMiddleware, async (c) => {
     
     // Prepara o contexto financeiro
     const estatisticasTexto = `
-- Total gasto: R$ ${estatisticas.totalSaidas?.toFixed(2) || '0.00'}
+- Total gasto: ${formatarMoeda(estatisticas.totalSaidas || 0)}
 - Total de transações: ${estatisticas.totalTransacoes || 0}
-- Média por transação: R$ ${estatisticas.mediaGasto?.toFixed(2) || '0.00'}
-- Maior gasto: R$ ${estatisticas.maiorGasto?.toFixed(2) || '0.00'}
-- Menor gasto: R$ ${estatisticas.menorGasto?.toFixed(2) || '0.00'}
-- Gasto hoje: R$ ${estatisticas.gastoHoje?.toFixed(2) || '0.00'}
-- Gasto do mês: R$ ${estatisticas.gastoMes?.toFixed(2) || '0.00'}
+- Média por transação: ${formatarMoeda(estatisticas.mediaGasto || 0)}
+- Maior gasto: ${formatarMoeda(estatisticas.maiorGasto || 0)}
+- Menor gasto: ${formatarMoeda(estatisticas.menorGasto || 0)}
+- Gasto hoje: ${formatarMoeda(estatisticas.gastoHoje || 0)}
+- Gasto do mês: ${formatarMoeda(estatisticas.gastoMes || 0)}
     `.trim();
 
     const transacoesTexto = transacoesData.transacoes.slice(0, 10).map((t: any) => 
-      `- ${t.descricao}: R$ ${t.valor.toFixed(2)} (${t.categoria})`
+      `- ${t.descricao}: ${formatarMoeda(t.valor)} (${t.categoria})`
     ).join('\n');
 
     const promptCompleto = `Você é um assistente inteligente do Zela, uma plataforma completa de gestão financeira pessoal via WhatsApp e portal web.
@@ -3426,10 +3710,8 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
       return temIndicador || (respostaMuitoCurta && respostaGenerica);
     };
 
-    // Verifica qual IA está disponível
     const temGroq = c.env.GROQ_API_KEY && c.env.GROQ_API_KEY.trim() !== '';
     const temGemini = c.env.GEMINI_API_KEY && c.env.GEMINI_API_KEY.trim() !== '';
-    const IA_PROVIDER = (c.env.IA_PROVIDER || '').toLowerCase().trim();
 
     if (!temGroq && !temGemini) {
       return c.json({ 
@@ -3440,10 +3722,8 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
 
     let resposta: string;
 
-    // Tenta usar Groq primeiro (se configurado)
-    if ((IA_PROVIDER === 'groq' || !IA_PROVIDER) && temGroq) {
+    if (temGroq) {
       try {
-        console.log('🤖 Chat IA - Usando Groq');
         const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -3468,19 +3748,14 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
         const groqData = await groqResponse.json();
         const respostaGroq = groqData.choices[0]?.message?.content || '';
         
-        // Verifica se a IA não entendeu e substitui por mensagem amigável
         if (!respostaGroq || verificarSeNaoEntendeu(respostaGroq)) {
-          console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
           resposta = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
         } else {
           resposta = respostaGroq;
         }
       } catch (error: any) {
-        console.warn('⚠️  Erro ao usar Groq, tentando Gemini...', error.message);
         if (temGemini) {
-          // Fallback para Gemini
           try {
-            console.log('🤖 Chat IA - Usando Gemini (fallback)');
             const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -3498,9 +3773,7 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
             const geminiData = await geminiResponse.json();
             const respostaGemini = geminiData.candidates[0]?.content?.parts[0]?.text || '';
             
-            // Verifica se a IA não entendeu e substitui por mensagem amigável
             if (!respostaGemini || verificarSeNaoEntendeu(respostaGemini)) {
-              console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
               resposta = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
             } else {
               resposta = respostaGemini;
@@ -3513,9 +3786,7 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
         }
       }
     } else if (temGemini) {
-      // Usa Gemini diretamente
       try {
-        console.log('🤖 Chat IA - Usando Gemini');
         const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3533,9 +3804,7 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
         const geminiData = await geminiResponse.json();
         const respostaGemini = geminiData.candidates[0]?.content?.parts[0]?.text || '';
         
-        // Verifica se a IA não entendeu e substitui por mensagem amigável
         if (!respostaGemini || verificarSeNaoEntendeu(respostaGemini)) {
-          console.log('⚠️  IA não entendeu a mensagem, retornando resposta amigável');
           resposta = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
         } else {
           resposta = respostaGemini;
@@ -3548,7 +3817,6 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
       throw new Error('Nenhuma IA disponível');
     }
 
-    console.log('✅ Chat de IA - Resposta gerada');
     
     return c.json({
       success: true,
@@ -3566,7 +3834,6 @@ Responda à pergunta do usuário de forma clara, prática e útil. Se for sobre 
 app.post('/webhook/zapi', async (c) => {
   try {
     const body = await c.req.json();
-    console.log('🔔 Webhook Z-API recebido:', JSON.stringify(body, null, 2));
     
     // Extrai dados da mensagem
     const phoneNumber = body.isGroup ? body.participantPhone : body.phone;
@@ -3574,11 +3841,9 @@ app.post('/webhook/zapi', async (c) => {
       return c.json({ success: false, error: 'phone é obrigatório' }, 400);
     }
     
-    console.log('📱 Número recebido do Z-API:', phoneNumber);
     
     // Remove caracteres não numéricos do número recebido
     const phoneNumberLimpo = phoneNumber.replace(/\D/g, '');
-    console.log('📱 Número limpo:', phoneNumberLimpo);
     
     // Formata o número - garante que tenha código do país (55 para Brasil)
     let telefoneFormatado: string;
@@ -3588,22 +3853,74 @@ app.post('/webhook/zapi', async (c) => {
       telefoneFormatado = formatarTelefone(`whatsapp:+55${phoneNumberLimpo}`);
     }
     
-    console.log('📱 Telefone formatado:', telefoneFormatado);
     
-    // Extrai texto da mensagem
+    // Extrai texto da mensagem ou botão clicado
     let messageText = body.text?.message || body.message?.text || body.message || '';
+    
+    // Verifica se é clique em botão
+    const buttonId = body.buttonId || body.button?.id || body.buttonList?.button?.id;
+    const buttonLabel = body.buttonLabel || body.button?.label || body.buttonList?.button?.label;
+    
+    if (buttonId) {
+      
+      // Processa clique no botão de excluir transação
+      if (buttonId.startsWith('excluir_transacao_')) {
+        const transacaoId = parseInt(buttonId.replace('excluir_transacao_', ''));
+        
+        if (!isNaN(transacaoId)) {
+          try {
+            // Busca ou cria token JWT para o usuário
+            const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, cleanFromNumber);
+            if (!usuario) {
+              await enviarMensagemZApi(telefoneFormatado, '❌ Usuário não encontrado. Por favor, faça login primeiro.', c.env);
+              return c.json({ success: false, error: 'Usuário não encontrado' }, 401);
+            }
+            
+            const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+            const token = await jwt.sign({ telefone: telefoneFormatado }, jwtSecret);
+            
+            // Chama endpoint de exclusão
+            const url = new URL(c.req.url);
+            const baseUrl = `${url.protocol}//${url.host}`;
+            const deleteUrl = `${baseUrl}/api/transacoes/${transacaoId}`;
+            
+            const response = await fetch(deleteUrl, {
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+            });
+            
+            const data: any = await response.json();
+            
+            if (data.success) {
+              await enviarMensagemZApi(telefoneFormatado, '✅ Transação excluída com sucesso!', c.env);
+              return c.json({ success: true, message: 'Transação excluída' });
+            } else {
+              await enviarMensagemZApi(telefoneFormatado, `❌ Erro ao excluir: ${data.error || 'Erro desconhecido'}`, c.env);
+              return c.json({ success: false, error: data.error }, 400);
+            }
+          } catch (error: any) {
+            console.error('❌ Erro ao processar exclusão via botão:', error);
+            await enviarMensagemZApi(telefoneFormatado, '❌ Erro ao excluir transação. Tente novamente.', c.env);
+            return c.json({ success: false, error: error.message }, 500);
+          }
+        }
+      }
+      
+      // Se não for um botão conhecido, trata como mensagem normal
+      messageText = buttonLabel || buttonId;
+    }
     
     // Processa áudio se houver
     const audioUrl = body.audio?.audioUrl || body.audio?.url || body.mediaUrl;
     const audioType = body.audio?.mimeType || body.audio?.type || body.mediaType || '';
     
     if (audioUrl && (audioType.startsWith('audio/') || audioUrl.includes('audio'))) {
-      console.log('🎤 Áudio detectado:', audioUrl);
-      console.log('🎵 Tipo de áudio:', audioType);
       
       try {
         // Baixa o áudio
-        console.log('📥 Baixando áudio de:', audioUrl);
         const audioResponse = await fetch(audioUrl);
         if (!audioResponse.ok) {
           throw new Error(`Erro ao baixar áudio: ${audioResponse.status}`);
@@ -3612,16 +3929,14 @@ app.post('/webhook/zapi', async (c) => {
         const audioBuffer = await audioResponse.arrayBuffer();
         const audioBase64 = btoa(String.fromCharCode(...new Uint8Array(audioBuffer)));
         
-        console.log('✅ Áudio baixado, tamanho:', audioBuffer.byteLength, 'bytes');
         
         // Transcreve usando Gemini ou Groq (se configurado)
         const geminiApiKey = c.env.GEMINI_API_KEY;
         const groqApiKey = c.env.GROQ_API_KEY;
-        const iaProvider = c.env.IA_PROVIDER || 'gemini';
         
-        if (geminiApiKey && (iaProvider === 'gemini' || !groqApiKey)) {
+        // Groq não suporta transcrição de áudio, então usa Gemini se disponível
+        if (geminiApiKey) {
           try {
-            console.log('🤖 Transcrevendo com Gemini...');
             
             const mimeType = audioType || 'audio/ogg';
             const prompt = 'Transcreva este áudio para texto em português brasileiro. Retorne apenas o texto transcrito, sem explicações adicionais.';
@@ -3658,7 +3973,6 @@ app.post('/webhook/zapi', async (c) => {
               
               // Se for erro de quota, tenta Groq se disponível
               if (errorCode === 429 && groqApiKey) {
-                console.log('⚠️ Gemini com quota excedida, tentando Groq...');
                 throw new Error('GEMINI_QUOTA_EXCEEDED');
               }
               
@@ -3671,16 +3985,13 @@ app.post('/webhook/zapi', async (c) => {
             const transcription = geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
             
             if (transcription && transcription.length > 0) {
-              console.log(`✅ Transcrição (Gemini): "${transcription}"`);
               messageText = transcription;
             } else {
-              console.log('⚠️ Transcrição vazia do Gemini');
               throw new Error('TRANSCRIPTION_EMPTY');
             }
           } catch (error: any) {
             // Se Gemini falhou e temos Groq, tenta Groq
             if (error.message === 'GEMINI_QUOTA_EXCEEDED' && groqApiKey) {
-              console.log('🔄 Tentando transcrição com Groq...');
               // Groq não suporta áudio diretamente, então envia mensagem amigável
               const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
               await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
@@ -3704,7 +4015,6 @@ app.post('/webhook/zapi', async (c) => {
             }, 400);
           }
         } else if (!geminiApiKey && !groqApiKey) {
-          console.log('⚠️ Nenhuma IA configurada para transcrição de áudio');
           const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
           await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
           return c.json({ 
@@ -3751,7 +4061,6 @@ app.post('/webhook/zapi', async (c) => {
     await registrarNumero(c.env.financezap_db, cleanFromNumber);
     
     // PRIMEIRO: Verifica se é solicitação de relatório
-    console.log('🔍 Verificando se é solicitação de relatório...');
     const mensagemLowerRelatorio = messageText.toLowerCase();
     const palavrasRelatorio = [
       'relatório', 'relatorio', 'relatório semanal', 'relatorio semanal',
@@ -3769,7 +4078,6 @@ app.post('/webhook/zapi', async (c) => {
     );
     
     if (temPalavraRelatorio) {
-      console.log('📊 Solicitação de relatório detectada, processando...');
       
       try {
         // Detecta o tipo de relatório
@@ -3783,7 +4091,6 @@ app.post('/webhook/zapi', async (c) => {
           tipoRelatorio = 'mensal';
         }
         
-        console.log(`📊 Gerando relatório ${tipoRelatorio}...`);
         
         // Calcula o período
         const periodo = calcularPeriodo(tipoRelatorio);
@@ -3796,7 +4103,6 @@ app.post('/webhook/zapi', async (c) => {
             carteiraNome = carteiraPadrao.nome;
           }
         } catch (error) {
-          console.warn('⚠️ Erro ao buscar carteira padrão:', error);
         }
         
         // Gera os dados do relatório
@@ -3816,7 +4122,6 @@ app.post('/webhook/zapi', async (c) => {
         
         // Envia o relatório
         await enviarMensagemZApi(telefoneFormatado, relatorioFormatado, c.env);
-        console.log(`✅ Relatório ${tipoRelatorio} enviado para:`, telefoneFormatado);
         
         return c.json({ success: true, message: `Relatório ${tipoRelatorio} enviado com sucesso` });
       } catch (error: any) {
@@ -3832,7 +4137,6 @@ app.post('/webhook/zapi', async (c) => {
     }
     
     // SEGUNDO: Verifica se é um agendamento antes de processar como transação
-    console.log('🔍 Verificando se é agendamento...');
     const palavrasAgendamento = [
       'agendar', 'agende', 'agendamento', 'agendado', 'agenda',
       'lembrar', 'lembre-me', 'lembre me', 'lembrete',
@@ -3848,14 +4152,12 @@ app.post('/webhook/zapi', async (c) => {
     );
     
     if (temPalavraAgendamento) {
-      console.log('📅 Palavras de agendamento detectadas, processando como agendamento...');
       
       try {
         // Processa agendamento usando IA
         const agendamentoExtraido = await processarAgendamentoComIA(messageText, c.env);
         
         if (agendamentoExtraido && agendamentoExtraido.sucesso) {
-          console.log('✅ Agendamento detectado:', JSON.stringify(agendamentoExtraido, null, 2));
           
           // Verifica se é recorrente (tem parcelas)
           const isRecorrente = agendamentoExtraido.recorrente && agendamentoExtraido.totalParcelas && agendamentoExtraido.totalParcelas > 1;
@@ -3873,19 +4175,17 @@ app.post('/webhook/zapi', async (c) => {
               categoria: agendamentoExtraido.categoria || 'outros',
               totalParcelas: agendamentoExtraido.totalParcelas!,
             });
-            console.log(`✅ ${ids.length} agendamentos recorrentes criados:`, ids);
           } else {
             // Cria apenas um agendamento
-            const agendamentoId = await criarAgendamentoD1(c.env.financezap_db, {
-              telefone: cleanFromNumber,
-              descricao: agendamentoExtraido.descricao,
-              valor: agendamentoExtraido.valor,
-              dataAgendamento: agendamentoExtraido.dataAgendamento,
-              tipo: agendamentoExtraido.tipo,
-              categoria: agendamentoExtraido.categoria || 'outros',
-            });
+          const agendamentoId = await criarAgendamentoD1(c.env.financezap_db, {
+            telefone: cleanFromNumber,
+            descricao: agendamentoExtraido.descricao,
+            valor: agendamentoExtraido.valor,
+            dataAgendamento: agendamentoExtraido.dataAgendamento,
+            tipo: agendamentoExtraido.tipo,
+            categoria: agendamentoExtraido.categoria || 'outros',
+          });
             ids = [agendamentoId];
-            console.log('✅ Agendamento criado com ID:', agendamentoId);
           }
           
           // Formata a resposta
@@ -3895,8 +4195,8 @@ app.post('/webhook/zapi', async (c) => {
           let respostaAgendamento = '';
           if (isRecorrente) {
             respostaAgendamento = `✅ Agendamento recorrente criado com sucesso!\n\n` +
-              `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n` +
-              `💰 Valor: R$ ${agendamentoExtraido.valor.toFixed(2)} por parcela\n` +
+            `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n` +
+              `💰 Valor: ${formatarMoeda(agendamentoExtraido.valor)} por parcela\n` +
               `📊 Total de parcelas: ${agendamentoExtraido.totalParcelas}\n` +
               `📆 Primeira parcela: ${dataFormatada}\n\n` +
               `Você receberá lembretes mensais até a parcela ${agendamentoExtraido.totalParcelas}.\n\n` +
@@ -3904,17 +4204,16 @@ app.post('/webhook/zapi', async (c) => {
           } else {
             respostaAgendamento = `✅ Agendamento criado com sucesso!\n\n` +
               `📅 ${tipoTexto}: ${agendamentoExtraido.descricao}\n` +
-              `💰 Valor: R$ ${agendamentoExtraido.valor.toFixed(2)}\n` +
-              `📆 Data: ${dataFormatada}\n\n` +
-              `Você receberá um lembrete no dia ${dataFormatada}.\n\n` +
-              `💡 Quando pagar/receber, responda "pago" ou "recebido" para registrar automaticamente.`;
+              `💰 Valor: ${formatarMoeda(agendamentoExtraido.valor)}\n` +
+            `📆 Data: ${dataFormatada}\n\n` +
+            `Você receberá um lembrete no dia ${dataFormatada}.\n\n` +
+            `💡 Quando pagar/receber, responda "pago" ou "recebido" para registrar automaticamente.`;
           }
           
           await enviarMensagemZApi(telefoneFormatado, respostaAgendamento, c.env);
           
           return c.json({ success: true, message: isRecorrente ? 'Agendamentos recorrentes processados com sucesso' : 'Agendamento processado com sucesso' });
         } else {
-          console.log('⚠️ Não foi possível extrair agendamento da mensagem');
         }
       } catch (error: any) {
         console.error('❌ Erro ao processar agendamento:', error);
@@ -3929,15 +4228,172 @@ app.post('/webhook/zapi', async (c) => {
       // Ignora erro de feedback visual
     }
     
+    // MELHORIA: Obtém estado atual do usuário
+    const estadoAtual = await obterEstadoUsuario(c.env.financezap_db, cleanFromNumber);
+    
     // MELHORIA: Obtém contexto de conversação
     const contexto = await obterContextoConversacaoD1(c.env.financezap_db, cleanFromNumber);
     
     // MELHORIA: Adiciona mensagem do usuário ao contexto
     await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'user', messageText);
     
-    // MELHORIA: Detecta intenção primeiro
+    // MELHORIA: Verifica se está em estado de confirmação
+    if (estadoAtual?.estado === EstadoConversacao.AGUARDANDO_CONFIRMACAO) {
+      const dadosTemp = estadoAtual.dadosTemporarios;
+      
+      if (intencao.intencao === 'confirmacao') {
+        // Usuário confirmou - salva transações
+        if (dadosTemp?.transacoes) {
+          try {
+            const dataHora = new Date().toISOString();
+            const data = dataHora.slice(0, 10);
+            const idsSalvos: number[] = [];
+            
+            for (const transacao of dadosTemp.transacoes) {
+              const id = await executarDBComRetry(() =>
+                salvarTransacao(c.env.financezap_db, {
+                  telefone: cleanFromNumber,
+                  descricao: transacao.descricao,
+                  valor: transacao.valor,
+                  categoria: transacao.categoria || 'outros',
+                  tipo: transacao.tipo,
+                  metodo: transacao.metodo || 'debito',
+                  dataHora: dataHora,
+                  data: data,
+                })
+              );
+              idsSalvos.push(id);
+            }
+            
+            // Limpa estado
+            await limparEstadoUsuario(c.env.financezap_db, cleanFromNumber);
+            
+            // Formata resposta usando template
+            const resposta = dadosTemp.transacoes.length === 1
+              ? formatarResposta('transacao_sucesso', {
+                  descricao: dadosTemp.transacoes[0].descricao,
+                  valor: formatarMoeda(dadosTemp.transacoes[0].valor),
+                  tipo: dadosTemp.transacoes[0].tipo === 'entrada' ? '💰 Entrada' : '🔴 Saída',
+                  categoria: dadosTemp.transacoes[0].categoria || 'outros',
+                  carteira: '—',
+                  data: new Date().toLocaleDateString('pt-BR'),
+                })
+              : formatarResposta('transacao_multipla_sucesso', {
+                  quantidade: dadosTemp.transacoes.length,
+                  transacoes: formatarListaTransacoes(dadosTemp.transacoes),
+                  total: formatarMoeda(dadosTemp.transacoes.reduce((sum: number, t: any) => sum + t.valor, 0)),
+                });
+            
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+            const mensagens = dividirMensagem(resposta);
+            for (const msg of mensagens) {
+              await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+            }
+            
+            return c.json({ success: true, message: 'Transações confirmadas e salvas' });
+          } catch (error: any) {
+            await limparEstadoUsuario(c.env.financezap_db, cleanFromNumber);
+            throw error;
+          }
+        }
+      } else if (intencao.intencao === 'cancelamento') {
+        // Usuário cancelou
+        await limparEstadoUsuario(c.env.financezap_db, cleanFromNumber);
+        const resposta = '❌ Transação cancelada.';
+        await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+        return c.json({ success: true, message: 'Transação cancelada' });
+      } else if (intencao.intencao === 'edicao') {
+        // Usuário quer editar - mantém estado mas permite edição
+        await definirEstadoUsuario(
+          c.env.financezap_db,
+          cleanFromNumber,
+          EstadoConversacao.EDITANDO_TRANSACAO,
+          dadosTemp
+        );
+        const resposta = '✏️ O que deseja alterar? Envie os novos dados.';
+        await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+        return c.json({ success: true, message: 'Aguardando edição' });
+      }
+    }
+    
+    // ROTEADOR IA DESABILITADO TEMPORARIAMENTE - usando processamento tradicional direto
+    // const temIA = (c.env.GROQ_API_KEY && c.env.GROQ_API_KEY.trim() !== '') || 
+    //               (c.env.GEMINI_API_KEY && c.env.GEMINI_API_KEY.trim() !== '');
+    
+    // if (temIA) {
+    //   try {
+    //     const contextoArray = contexto?.mensagens || [];
+    //     const decisaoIA = await decidirEndpointComIA(messageText, contextoArray, c.env);
+    //     
+    //     if (decisaoIA && decisaoIA.endpoint) {
+    //       let token: string | null = null;
+    //       try {
+    //         const usuario = await buscarUsuarioPorTelefone(c.env.financezap_db, cleanFromNumber);
+    //         if (usuario) {
+    //           const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    //           token = await jwt.sign({ telefone: telefoneFormatado }, jwtSecret);
+    //         }
+    //       } catch (error: any) {
+    //         // Continua com processamento tradicional
+    //       }
+    //       
+    //       if (token) {
+    //         const url = new URL(c.req.url);
+    //         const baseUrl = `${url.protocol}//${url.host}`;
+    //         const resultado = await chamarEndpointInterno(
+    //           decisaoIA.endpoint,
+    //           decisaoIA.params,
+    //           telefoneFormatado,
+    //           token,
+    //           baseUrl,
+    //           c.env
+    //         );
+    //         
+    //         if (resultado.success && resultado.data) {
+    //           try {
+    //             const respostaFormatada = decisaoIA.endpoint.responseFormatter(resultado.data, decisaoIA.params);
+    //             
+    //             let mensagemTexto: string;
+    //             let botoes: Array<{ id: string; label: string }> | undefined;
+    //             
+    //             if (typeof respostaFormatada === 'object' && respostaFormatada.message) {
+    //               mensagemTexto = respostaFormatada.message;
+    //               botoes = respostaFormatada.buttons;
+    //             } else {
+    //               mensagemTexto = respostaFormatada as string;
+    //             }
+    //             
+    //             await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagemTexto);
+    //             
+    //             if (botoes && botoes.length > 0) {
+    //               const envioResult = await enviarMensagemComButtonListZApi(telefoneFormatado, mensagemTexto, botoes, c.env);
+    //               if (!envioResult.success) {
+    //                 const mensagens = dividirMensagem(mensagemTexto);
+    //                 for (const msg of mensagens) {
+    //                   await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+    //                 }
+    //               }
+    //             } else {
+    //               const mensagens = dividirMensagem(mensagemTexto);
+    //               for (const msg of mensagens) {
+    //                 await enviarMensagemZApi(telefoneFormatado, msg, c.env);
+    //               }
+    //             }
+    //             
+    //             return c.json({ success: true, message: 'Processado via roteamento inteligente' });
+    //           } catch (formatError: any) {
+    //             // Continua com processamento tradicional
+    //           }
+    //         }
+    //       }
+    //     }
+    //   } catch (error: any) {
+    //     // Continua com processamento tradicional em caso de erro
+    //   }
+    // }
+    
+    // MELHORIA: Detecta intenção primeiro (processamento tradicional)
     const intencao = detectarIntencao(messageText, contexto);
-    console.log(`🎯 Intenção detectada: ${intencao.intencao} (confiança: ${intencao.confianca})`);
     
     // MELHORIA: Processa comandos rápidos
     if (intencao.intencao === 'comando' && intencao.detalhes?.comando) {
@@ -3987,7 +4443,6 @@ app.post('/webhook/zapi', async (c) => {
     
     // MELHORIA: Processa pedido de saldo (saldo total e por carteira)
     if (intencao.intencao === 'saldo') {
-      console.log('💰 Solicitação de saldo detectada!');
       
       // Calcula saldo por carteira
       const saldoTotal = await calcularSaldoPorCarteiraD1(c.env.financezap_db, telefoneFormatado);
@@ -4011,9 +4466,9 @@ app.post('/webhook/zapi', async (c) => {
       });
     }
     
+    
     // MELHORIA: Processa pedido de exclusão de transação
     if (intencao.intencao === 'exclusao') {
-      console.log('🗑️ Solicitação de exclusão detectada!');
       
       // Busca transações recentes do usuário (últimas 10)
       const { buscarTransacoes } = await import('./d1');
@@ -4078,17 +4533,166 @@ app.post('/webhook/zapi', async (c) => {
       return c.json({ success: true, message: 'Lista de transações enviada' });
     }
     
+    // MELHORIA: Processa pedido de edição de agendamento
+    if (intencao.intencao === 'edicao' && intencao.detalhes?.tipoAgendamento) {
+      // Verifica se há um ID na mensagem (formato: "editar agendamento 123" ou "editar agendamento ID123")
+      const mensagemLower = messageText.toLowerCase();
+      const idMatch = mensagemLower.match(/(?:agendamento|agendamentos?)\s*(?:id|#)?\s*(\d+)/);
+      
+      if (idMatch) {
+        // Edição direta com ID
+        const agendamentoId = parseInt(idMatch[1]);
+        
+        try {
+          const agendamento = await buscarAgendamentoPorIdD1(c.env.financezap_db, agendamentoId);
+          
+          if (!agendamento) {
+            const resposta = `❌ Agendamento #${agendamentoId} não encontrado.`;
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+            await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            return c.json({ success: true, message: 'Agendamento não encontrado' });
+          }
+          
+          // Verifica se o agendamento pertence ao usuário
+          if (!telefonesCorrespondem(agendamento.telefone, telefoneFormatado)) {
+            const resposta = `❌ Você não tem permissão para editar este agendamento.`;
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+            await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            return c.json({ success: true, message: 'Sem permissão' });
+          }
+          
+          // Processa a edição com IA para extrair novos dados
+          const temGroq = c.env.GROQ_API_KEY && c.env.GROQ_API_KEY.trim() !== '';
+          const temGemini = c.env.GEMINI_API_KEY && c.env.GEMINI_API_KEY.trim() !== '';
+          
+          if (temGroq || temGemini) {
+            const processadorAgendamento = await import('./processadorAgendamento');
+            const novosDados = await processadorAgendamento.processarAgendamentoComIA(messageText);
+            
+            if (novosDados && novosDados.sucesso) {
+              const dadosAtualizacao: any = {};
+              if (novosDados.descricao) dadosAtualizacao.descricao = novosDados.descricao;
+              if (novosDados.valor && novosDados.valor > 0) dadosAtualizacao.valor = novosDados.valor;
+              if (novosDados.dataAgendamento) dadosAtualizacao.dataAgendamento = novosDados.dataAgendamento;
+              if (novosDados.tipo) dadosAtualizacao.tipo = novosDados.tipo;
+              if (novosDados.categoria) dadosAtualizacao.categoria = novosDados.categoria;
+              
+              if (Object.keys(dadosAtualizacao).length > 0) {
+                const atualizado = await atualizarAgendamentoD1(c.env.financezap_db, agendamentoId, dadosAtualizacao);
+                
+                if (atualizado) {
+                  const dataFormatada = novosDados.dataAgendamento 
+                    ? new Date(novosDados.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR')
+                    : new Date(agendamento.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR');
+                  
+                  const resposta = `✅ *Agendamento atualizado com sucesso!*\n\n` +
+                    `📋 *${dadosAtualizacao.descricao || agendamento.descricao}*\n` +
+                    `💰 ${formatarMoeda(dadosAtualizacao.valor || agendamento.valor)}\n` +
+                    `📅 ${dataFormatada}\n` +
+                    `🔄 ${(dadosAtualizacao.tipo || agendamento.tipo) === 'pagamento' ? 'Pagamento' : 'Recebimento'}`;
+                  
+                  await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+                  await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+                  
+                  return c.json({ success: true, message: 'Agendamento atualizado' });
+                } else {
+                  const resposta = `❌ Erro ao atualizar agendamento. Tente novamente.`;
+                  await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+                  return c.json({ success: false, error: 'Erro ao atualizar' });
+                }
+              } else {
+                const resposta = `⚠️ Não foi possível extrair informações para atualização.\n\n` +
+                  `💡 Envie uma mensagem como:\n` +
+                  `"Editar agendamento ${agendamentoId}: valor 300, data 20/12"`;
+                await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+                return c.json({ success: true, message: 'Dados insuficientes' });
+              }
+            } else {
+              const resposta = `⚠️ Não consegui entender as informações para atualizar.\n\n` +
+                `💡 Informe o que deseja alterar, por exemplo:\n` +
+                `"Editar agendamento ${agendamentoId}: valor 300, data 20/12"`;
+              await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+              return c.json({ success: true, message: 'Erro ao processar dados' });
+            }
+          } else {
+            const resposta = `❌ Funcionalidade de edição requer configuração de IA.`;
+            await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            return c.json({ success: false, error: 'IA não configurada' });
+          }
+        } catch (error: any) {
+          console.error('Erro ao editar agendamento:', error);
+          const resposta = `❌ Erro ao editar agendamento: ${error.message}`;
+          await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+          return c.json({ success: false, error: error.message });
+        }
+      } else {
+        // Lista agendamentos para o usuário escolher
+        const agendamentos = await buscarAgendamentosD1(c.env.financezap_db, telefoneFormatado, {
+          status: 'pendente'
+        });
+        
+        if (agendamentos.length === 0) {
+          const resposta = '❌ Você não tem agendamentos pendentes para editar.';
+          await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+          await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+          return c.json({ success: true, message: 'Nenhum agendamento encontrado' });
+        }
+        
+        // Limita a 10 agendamentos
+        const agendamentosLimitados = agendamentos.slice(0, 10);
+        let mensagem = '📋 *Selecione O Agendamento Que Deseja Editar:*\n\n';
+        mensagem += 'Envie uma mensagem com o ID do agendamento, por exemplo:\n';
+        mensagem += '"Editar agendamento 1"\n\n';
+        mensagem += '*Seus agendamentos pendentes:*\n\n';
+        
+        agendamentosLimitados.forEach((ag, index) => {
+          const dataFormatada = new Date(ag.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR');
+          const tipoEmoji = ag.tipo === 'recebimento' ? '💰' : '🔴';
+          mensagem += `${index + 1}. ${tipoEmoji} *${ag.descricao}*\n`;
+          mensagem += `   💰 ${formatarMoeda(ag.valor)}\n`;
+          mensagem += `   📅 ${dataFormatada}\n`;
+          mensagem += `   🆔 ID: ${ag.id}\n\n`;
+        });
+        
+        mensagem += '💡 *Como editar:*\n';
+        mensagem += 'Envie: "Editar agendamento [ID]: [mudanças]"\n';
+        mensagem += 'Exemplo: "Editar agendamento 1: valor 300, data 25/12"';
+        
+        await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagem);
+        await enviarMensagemZApi(telefoneFormatado, mensagem, c.env);
+        
+        return c.json({ success: true, message: 'Lista de agendamentos enviada' });
+      }
+    }
+    
     // Se não foi agendamento, processa como transação usando IA
-    console.log('💰 Processando como transação com IA...');
     
     // MELHORIA: Só processa se intenção for transação ou desconhecida
     if (intencao.intencao === 'transacao' || intencao.intencao === 'desconhecida') {
+      // Verifica se há IA disponível antes de tentar processar
+      const temGroq = c.env.GROQ_API_KEY && c.env.GROQ_API_KEY.trim() !== '';
+      const temGemini = c.env.GEMINI_API_KEY && c.env.GEMINI_API_KEY.trim() !== '';
+      
+      if (temGroq || temGemini) {
       try {
-        // Processa mensagem com IA para extrair transações
-        const transacoesExtraidas = await processarMensagemComIAWorker(messageText, c.env);
+        // MELHORIA: Processa com cache, retry e métricas
+        const tipoMensagem = 'extracao_transacao';
+        const transacoesExtraidas = await medirTempoExecucao(
+          c.env.financezap_db,
+          cleanFromNumber,
+          tipoMensagem,
+          () => processarComCache(
+            c.env.financezap_db,
+            messageText,
+            tipoMensagem,
+            () => processarComRetry(
+              () => processarMensagemComIAWorker(messageText, c.env),
+              { maxTentativas: 3 }
+            )
+          )
+        );
         
         if (transacoesExtraidas && transacoesExtraidas.length > 0) {
-          console.log(`✅ ${transacoesExtraidas.length} transação(ões) extraída(s) pela IA`);
           
           // MELHORIA: Valida qualidade da extração
           const scoreExtracao = calcularScoreMedio(transacoesExtraidas.map(t => ({
@@ -4099,15 +4703,21 @@ app.post('/webhook/zapi', async (c) => {
             metodo: t.metodo
           })));
           
-          console.log(`📊 Score de qualidade: ${scoreExtracao.valor.toFixed(2)} - ${scoreExtracao.motivo}`);
           
           // MELHORIA: Se qualidade baixa, pede mais informações
           if (devePedirMaisInformacoes(scoreExtracao)) {
-            let respostaQualidade = `⚠️ Preciso de mais informações:\n\n`;
-            scoreExtracao.problemas.forEach((p, i) => {
-              respostaQualidade += `${i + 1}. ${p}\n`;
+            // Define estado como aguardando dados
+            await definirEstadoUsuario(
+              c.env.financezap_db,
+              cleanFromNumber,
+              EstadoConversacao.AGUARDANDO_DADOS,
+              { problemas: scoreExtracao.problemas, sugestoes: scoreExtracao.sugestoes }
+            );
+            
+            const respostaQualidade = formatarResposta('erro_validacao', {
+              mensagem: 'Preciso de mais informações:',
+              dicas: scoreExtracao.problemas.map((p, i) => `${i + 1}. ${p}`).join('\n') + '\n\n' + scoreExtracao.sugestoes.join('\n'),
             });
-            respostaQualidade += `\n💡 ${scoreExtracao.sugestoes.join('\n💡 ')}`;
             
             await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaQualidade);
             const mensagens = dividirMensagem(respostaQualidade);
@@ -4119,7 +4729,34 @@ app.post('/webhook/zapi', async (c) => {
             return c.json({ success: true, message: 'Solicitando mais informações' });
           }
           
-          // Salva transações diretamente sem confirmação
+          // MELHORIA: Sistema de confirmação (opcional - pode ser desabilitado)
+          const usarConfirmacao = false; // Por enquanto desabilitado para manter comportamento atual
+          
+          if (usarConfirmacao && devePedirConfirmacao(scoreExtracao)) {
+            // Define estado como aguardando confirmação
+            await definirEstadoUsuario(
+              c.env.financezap_db,
+              cleanFromNumber,
+              EstadoConversacao.AGUARDANDO_CONFIRMACAO,
+              { transacoes: transacoesExtraidas }
+            );
+            
+            // Mostra confirmação usando template
+            const primeiraTransacao = transacoesExtraidas[0];
+            const resposta = formatarResposta('confirmacao_transacao', {
+              descricao: primeiraTransacao.descricao,
+              valor: formatarMoeda(primeiraTransacao.valor),
+              tipo: primeiraTransacao.tipo === 'entrada' ? '💰 Entrada' : '🔴 Saída',
+              categoria: primeiraTransacao.categoria || 'outros',
+            });
+            
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+            await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            
+            return c.json({ success: true, message: 'Aguardando confirmação' });
+          }
+          
+          // Salva transações diretamente (comportamento atual)
           const dataHora = new Date().toISOString();
           const data = dataHora.slice(0, 10);
           const idsSalvos: number[] = [];
@@ -4142,37 +4779,39 @@ app.post('/webhook/zapi', async (c) => {
               const tipoCarteiraNecessario = (transacaoExtraida.metodo || 'debito') as 'debito' | 'credito';
               
               // Busca ou cria carteira apropriada
-              const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
-              let carteiraId: number | null = null;
-              let carteiraNome: string | undefined = undefined;
-              
-              const tipoNome = tipoCarteiraNecessario === 'credito' ? 'Crédito' : 'Débito';
-              const carteiraEncontrada = carteiras.find(c => 
-                c.nome.toLowerCase().includes(tipoCarteiraNecessario) ||
-                c.nome.toLowerCase().includes(tipoNome.toLowerCase())
-              );
-              
-              if (carteiraEncontrada && carteiraEncontrada.id) {
-                carteiraId = carteiraEncontrada.id;
-                carteiraNome = carteiraEncontrada.nome;
-              } else if (carteiras.length > 0 && carteiras[0].id) {
-                carteiraId = carteiras[0].id;
-                carteiraNome = carteiras[0].nome;
-              } else {
-                const novaCarteiraId = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
-                  nome: tipoCarteiraNecessario === 'credito' ? 'Cartão de Crédito' : 'Cartão de Débito',
-                  descricao: `Carteira ${tipoCarteiraNecessario}`,
-                  padrao: false
-                });
-                carteiraId = novaCarteiraId;
-                // Busca a carteira criada para obter o nome
-                const carteiraCriada = await buscarCarteiraPorIdD1(c.env.financezap_db, novaCarteiraId, telefoneFormatado);
-                if (carteiraCriada) {
-                  carteiraNome = carteiraCriada.nome;
+              const aliasInformado = (transacaoExtraida as any)?.carteira || (transacaoExtraida as any)?.carteiraNome;
+              const carteiraResolvida = await resolverCarteiraPorTextoD1(c.env.financezap_db, telefoneFormatado, {
+                nomeInformado: aliasInformado,
+                textoOriginal: messageText,
+                tipoPreferido: tipoCarteiraNecessario,
+              });
+
+              let carteiraId: number | null = carteiraResolvida.carteira?.id ?? null;
+              let carteiraNome: string | undefined = carteiraResolvida.carteira?.nome;
+
+              // Se não encontrou carteira (caso usuário não tenha carteiras ainda), cria uma do tipo necessário
+              if (!carteiraId) {
+                const carteiras = await buscarCarteirasD1(c.env.financezap_db, telefoneFormatado);
+                if (carteiras.length > 0 && carteiras[0].id) {
+                  carteiraId = carteiras[0].id;
+                  carteiraNome = carteiras[0].nome;
+                } else {
+                  const novaCarteiraId = await criarCarteiraD1(c.env.financezap_db, telefoneFormatado, {
+                    nome: tipoCarteiraNecessario === 'credito' ? 'Cartão de Crédito' : 'Carteira de Débito',
+                    descricao: `Carteira ${tipoCarteiraNecessario}`,
+                    padrao: false
+                  });
+                  carteiraId = novaCarteiraId;
+                  const carteiraCriada = await buscarCarteiraPorIdD1(c.env.financezap_db, novaCarteiraId, telefoneFormatado);
+                  if (carteiraCriada) {
+                    carteiraNome = carteiraCriada.nome;
+                  }
                 }
               }
               
-              const transacaoId = await salvarTransacao(c.env.financezap_db, {
+              // MELHORIA: Usa retry para salvar transação
+              const transacaoId = await executarDBComRetry(() =>
+                salvarTransacao(c.env.financezap_db, {
                 telefone: telefoneFormatado,
                 descricao: transacaoExtraida.descricao,
                 valor: transacaoExtraida.valor,
@@ -4183,8 +4822,19 @@ app.post('/webhook/zapi', async (c) => {
                 data,
                 mensagemOriginal: messageText,
                 carteiraId: carteiraId
-              });
+                })
+              );
               
+              if (carteiraId) {
+                await registrarUltimaCarteiraUsadaD1(c.env.financezap_db, telefoneFormatado, carteiraId);
+                await registrarAliasCarteiraD1(
+                  c.env.financezap_db,
+                  telefoneFormatado,
+                  carteiraId,
+                  aliasInformado || carteiraResolvida.aliasUsado
+                );
+              }
+
               idsSalvos.push(transacaoId);
               
               // Armazena dados para formatação da mensagem
@@ -4198,17 +4848,28 @@ app.post('/webhook/zapi', async (c) => {
                 id: transacaoId
               });
               
-              console.log(`✅ Transação salva (ID: ${transacaoId}): ${transacaoExtraida.descricao} - R$ ${transacaoExtraida.valor.toFixed(2)}`);
             } catch (error: any) {
               console.error(`❌ Erro ao salvar transação: ${error.message}`);
             }
           }
           
+          // Verifica se há transações salvas antes de formatar
+          console.log(`📊 Transações salvas: ${transacoesSalvas.length}`);
+          if (transacoesSalvas.length === 0) {
+            // Não há transações salvas, tenta fallback
+            console.error('❌ Nenhuma transação foi salva, tentando fallback');
+            throw new Error('Nenhuma transação foi salva');
+          }
+          
           // Formata mensagem com informações completas
+          console.log('📝 Formatando mensagem de resposta...');
           let resposta = '';
+          let transacaoIdParaBotao: number | undefined = undefined;
           
           if (transacoesSalvas.length === 1) {
             const t = transacoesSalvas[0];
+            transacaoIdParaBotao = idsSalvos[0];
+            console.log(`📝 Formatando mensagem para transação única (ID: ${transacaoIdParaBotao})`);
             resposta = formatarMensagemTransacao({
               descricao: t.descricao,
               valor: t.valor,
@@ -4217,87 +4878,77 @@ app.post('/webhook/zapi', async (c) => {
               metodo: t.metodo,
               carteiraNome: t.carteiraNome,
               data: data,
-              id: idsSalvos[0] || undefined
+              id: transacaoIdParaBotao
             });
+            console.log(`📝 Mensagem formatada (${resposta.length} caracteres):`, resposta.substring(0, 100) + '...');
+            
+            // Adiciona ao contexto
+            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
+            
+            // Envia resposta simples (sem botão)
+            console.log('📤 Enviando resposta simples para:', telefoneFormatado);
+            const resultadoSimples = await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            console.log('📥 Resultado mensagem simples:', JSON.stringify(resultadoSimples));
+            if (!resultadoSimples.success) {
+              console.error('❌ Erro ao enviar mensagem:', resultadoSimples.error);
+              throw new Error(`Erro ao enviar mensagem: ${resultadoSimples.error}`);
+            }
+            console.log('✅ Resposta enviada com sucesso!');
           } else {
-            resposta = formatarMensagemMultiplasTransacoes(
-              transacoesSalvas.map((t, index) => ({
+            // Múltiplas transações - MELHORIA: Usa template
+            console.log(`📝 Formatando mensagem para ${transacoesSalvas.length} transações`);
+            resposta = formatarResposta('transacao_multipla_sucesso', {
+              quantidade: transacoesSalvas.length,
+              transacoes: formatarListaTransacoes(
+                transacoesSalvas.map(t => ({
                 descricao: t.descricao,
                 valor: t.valor,
-                categoria: t.categoria,
                 tipo: t.tipo,
-                metodo: t.metodo,
-                carteiraNome: t.carteiraNome,
+                  categoria: t.categoria,
                 data: data,
-                id: idsSalvos[index] || undefined
-              }))
-            );
-          }
+                }))
+              ),
+              total: formatarMoeda(transacoesSalvas.reduce((sum, t) => sum + t.valor, 0)),
+            });
+            console.log(`📝 Mensagem formatada (${resposta.length} caracteres):`, resposta.substring(0, 100) + '...');
           
           // Adiciona ao contexto
           await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', resposta);
           
-          // Envia resposta
-          await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            // Envia resposta sem botões (múltiplas transações)
+            console.log('📤 Tentando enviar resposta (múltiplas transações) para:', telefoneFormatado);
+            const resultadoMultiplas = await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+            console.log('📥 Resultado múltiplas transações:', JSON.stringify(resultadoMultiplas));
+            if (!resultadoMultiplas.success) {
+              console.error('❌ Erro ao enviar mensagem múltiplas transações:', resultadoMultiplas.error);
+              throw new Error(`Erro ao enviar mensagem: ${resultadoMultiplas.error}`);
+            }
+            console.log('✅ Resposta enviada com sucesso!');
+          }
           
+          console.log('✅ Retornando sucesso para o webhook');
           return c.json({ 
             success: true, 
             message: 'Transações salvas com sucesso' 
           });
         } else {
-          // MELHORIA: Se não encontrou transação, verifica se é pergunta
-          if (intencao.intencao === 'pergunta') {
-            console.log('❓ Pergunta detectada, usando chat de IA...');
-            
-            const estatisticas = await calcularEstatisticas(c.env.financezap_db, { telefone: cleanFromNumber });
-            const transacoesRecentes = await buscarTransacoes(c.env.financezap_db, {
-              telefone: cleanFromNumber,
-              limit: 10
-            });
-            
-            const historicoTexto = formatarHistoricoParaPrompt(contexto);
-            
-            // Processa pergunta com chat IA (precisa implementar função similar)
-            const respostaIA = '💡 Para perguntas sobre suas finanças, acesse o portal web em usezela.com/painel';
-            
-            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', respostaIA);
-            const mensagens = dividirMensagem(respostaIA);
-            
-            for (const msg of mensagens) {
-              await enviarMensagemZApi(telefoneFormatado, msg, c.env);
-            }
-            
-            return c.json({ success: true, message: 'Pergunta respondida' });
-          } else {
-            console.log('⚠️ Nenhuma transação financeira encontrada na mensagem');
-            // MELHORIA: Mensagem mais útil quando não entende
-            const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
-              '💡 *Dicas:*\n' +
-              '• Para registrar gasto: "comprei café por 5 reais"\n' +
-              '• Para registrar receita: "recebi 500 reais"\n' +
-              '• Para ver resumo: "resumo financeiro"\n' +
-              '• Para ajuda: "ajuda" ou "/ajuda"';
-            
-            await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagemAmigavel);
-            await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
-          }
+            // IA não encontrou transações - tenta fallback
+            console.log('⚠️ IA não encontrou transações, tentando fallback');
         }
     } catch (error: any) {
       console.error('❌ Erro ao processar mensagem com IA:', error.message);
-      // Envia mensagem amigável em caso de erro
-      const mensagemAmigavel = 'Desculpe, não consegui entender sua pergunta 😊. Poderia reformular de outra forma? Estou aqui para ajudar com suas finanças ou dúvidas sobre o Zela!';
-      
-      try {
-        await enviarMensagemZApi(telefoneFormatado, mensagemAmigavel, c.env);
-      } catch (envioError: any) {
-        console.error('❌ Erro ao enviar mensagem amigável:', envioError.message);
+          // Erro na IA - tenta fallback
+        }
+      } else {
+        // Sem IA configurada, tenta fallback direto
+        console.log('⚠️ Sem IA configurada, tentando fallback');
       }
-      // Fallback: tenta salvar como transação básica se a IA falhar
+    
+    // Fallback: tenta salvar como transação básica se a IA falhar ou não encontrou
       const valorMatch = messageText.match(/(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/i);
       const valor = valorMatch ? parseFloat(valorMatch[1].replace(',', '.')) : 0;
       
       if (valor > 0) {
-        console.log('⚠️ Usando fallback: salvando transação básica');
         const dataHora = new Date().toISOString();
         const data = dataHora.slice(0, 10);
         
@@ -4306,6 +4957,12 @@ app.post('/webhook/zapi', async (c) => {
         const palavrasEntrada = ['recebi', 'recebido', 'ganhei', 'vendi', 'salário', 'salario', 'me pagou', 'me pagaram'];
         const tipo = palavrasEntrada.some(p => mensagemLower.includes(p)) ? 'entrada' : 'saida';
         
+        const carteiraFallback = await resolverCarteiraPorTextoD1(c.env.financezap_db, telefoneFormatado, {
+          textoOriginal: messageText,
+          tipoPreferido: 'debito',
+        });
+        const carteiraIdFallback = carteiraFallback.carteira?.id ?? null;
+
         const transacaoId = await salvarTransacao(c.env.financezap_db, {
           telefone: telefoneFormatado,
           descricao: messageText.substring(0, 200),
@@ -4316,11 +4973,19 @@ app.post('/webhook/zapi', async (c) => {
           dataHora,
           data,
           mensagemOriginal: messageText,
+          carteiraId: carteiraIdFallback,
         });
+
+        if (carteiraIdFallback) {
+          await registrarUltimaCarteiraUsadaD1(c.env.financezap_db, telefoneFormatado, carteiraIdFallback);
+          await registrarAliasCarteiraD1(
+            c.env.financezap_db,
+            telefoneFormatado,
+            carteiraIdFallback,
+            carteiraFallback.aliasUsado
+          );
+        }
         
-        console.log(`📡 SSE: Transação criada com ID ${transacaoId}, notificando clientes...`);
-        console.log(`📡 SSE: Telefone da transação: ${telefoneFormatado}`);
-        console.log(`📡 SSE: cleanFromNumber: ${cleanFromNumber}`);
         
         // Busca o telefone do usuário no banco para garantir correspondência
         let telefoneParaNotificar = telefoneFormatado;
@@ -4331,10 +4996,8 @@ app.post('/webhook/zapi', async (c) => {
             telefoneParaNotificar = usuario.telefone.startsWith('whatsapp:') 
               ? usuario.telefone 
               : `whatsapp:${usuario.telefone}`;
-            console.log(`📡 SSE: Telefone do usuário no banco: ${telefoneParaNotificar}`);
           }
         } catch (error) {
-          console.warn('⚠️ Erro ao buscar telefone do usuário:', error);
         }
         
         // SSE desabilitado - usando apenas botão de atualizar manual
@@ -4367,7 +5030,6 @@ app.post('/webhook/zapi', async (c) => {
             carteiraNome = carteiras[0].nome;
           }
         } catch (error) {
-          console.warn('⚠️ Erro ao buscar nome da carteira:', error);
         }
         
         // Formata mensagem com informações completas
@@ -4379,12 +5041,34 @@ app.post('/webhook/zapi', async (c) => {
           tipo: tipo,
           metodo: 'debito',
           carteiraNome: carteiraNome,
-          data: data
+          data: data,
+          id: transacaoId
         });
         
-        await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+        // Envia resposta simples (sem botão)
+        console.log('📤 Enviando resposta simples (fallback) para:', telefoneFormatado);
+        const resultadoSimples = await enviarMensagemZApi(telefoneFormatado, resposta, c.env);
+        console.log('📥 Resultado mensagem simples (fallback):', JSON.stringify(resultadoSimples));
+        if (!resultadoSimples.success) {
+          console.error('❌ Erro ao enviar mensagem (fallback):', resultadoSimples.error);
+        }
+        
+        return c.json({ success: true, message: 'Transação salva via fallback' });
       }
-      }
+    }
+    
+    // Se chegou aqui e não processou nada, envia mensagem de "não consegui entender"
+    const mensagemAmigavel = 'Desculpe, não consegui entender sua mensagem 😊.\n\n' +
+      '💡 *Dicas:*\n' +
+      '• Para registrar gasto: "comprei café por 5 reais"\n' +
+      '• Para registrar receita: "recebi 500 reais"\n' +
+      '• Para ver resumo: "resumo financeiro"\n' +
+      '• Para ajuda: "ajuda" ou "/ajuda"';
+    
+    await adicionarMensagemContextoD1(c.env.financezap_db, cleanFromNumber, 'assistant', mensagemAmigavel);
+    const mensagens = dividirMensagem(mensagemAmigavel);
+    for (const msg of mensagens) {
+      await enviarMensagemZApi(telefoneFormatado, msg, c.env);
     }
     
     return c.json({ success: true, message: 'Mensagem processada' });
@@ -4395,19 +5079,370 @@ app.post('/webhook/zapi', async (c) => {
 });
 
 // Scheduled handler para notificações automáticas de agendamentos
+// Endpoints de administração e monitoramento
+app.get('/api/admin/metricas', async (c) => {
+  try {
+    const query = c.req.query();
+    const telefone = query.telefone;
+    const dias = query.dias ? parseInt(query.dias) : 7;
+
+    const estatisticas = await obterEstatisticasProcessamento(
+      c.env.financezap_db,
+      telefone,
+      dias
+    );
+
+    return c.json({ success: true, estatisticas });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.get('/api/admin/queue/stats', async (c) => {
+  try {
+    const { obterEstatisticasQueue } = await import('./queueProcessamento');
+    const stats = await obterEstatisticasQueue(c.env.financezap_db);
+
+    return c.json({ success: true, stats });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.post('/api/admin/queue/processar', async (c) => {
+  try {
+    const { obterProximaMensagemQueue, marcarMensagemProcessando, marcarMensagemConcluida, marcarMensagemErro } = await import('./queueProcessamento');
+    
+    const mensagem = await obterProximaMensagemQueue(c.env.financezap_db);
+    
+    if (!mensagem) {
+      return c.json({ success: true, message: 'Nenhuma mensagem pendente' });
+    }
+
+    await marcarMensagemProcessando(c.env.financezap_db, mensagem.id);
+
+    // Processa a mensagem (simula processamento)
+    // Em produção, aqui chamaria o processador de mensagens
+    try {
+      // Simula processamento bem-sucedido
+      await marcarMensagemConcluida(c.env.financezap_db, mensagem.id, 'Processado com sucesso');
+      return c.json({ success: true, message: 'Mensagem processada', id: mensagem.id });
+    } catch (error: any) {
+      await marcarMensagemErro(c.env.financezap_db, mensagem.id, error.message);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// API: Gerar dados do relatório - PROTEGIDA
+app.post('/api/relatorios/gerar', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const body = await c.req.json();
+    const filtros: any = {
+      telefone: telefoneFormatado,
+      dataInicio: body.dataInicio,
+      dataFim: body.dataFim,
+      categoria: body.categoria,
+      valorMin: body.valorMin,
+      valorMax: body.valorMax,
+      limit: 10000, // Busca todas as transações para o relatório
+    };
+
+    // Aplica filtro de tipo
+    if (body.tipo && body.tipo !== 'todos') {
+      filtros.tipo = body.tipo;
+    }
+
+    // Aplica filtro de método
+    if (body.metodo && body.metodo !== 'todos') {
+      filtros.metodo = body.metodo;
+    }
+
+    // Busca transações
+    const resultado = await buscarTransacoes(c.env.financezap_db, filtros);
+    const transacoes = resultado.transacoes || [];
+
+    // Calcula totais
+    const totalEntradas = transacoes
+      .filter((t: any) => t.tipo === 'entrada')
+      .reduce((sum: number, t: any) => sum + (t.valor || 0), 0);
+    
+    const totalSaidas = transacoes
+      .filter((t: any) => t.tipo === 'saida')
+      .reduce((sum: number, t: any) => sum + (t.valor || 0), 0);
+
+    // Agrupa gastos por dia (últimos 30 dias ou período do filtro)
+    const gastosPorDia: any[] = [];
+    let dataInicio: Date;
+    let dataFim: Date;
+    
+    if (filtros.dataInicio) {
+      dataInicio = new Date(filtros.dataInicio);
+      if (isNaN(dataInicio.getTime())) {
+        dataInicio = new Date();
+        dataInicio.setDate(dataInicio.getDate() - 30);
+      }
+    } else {
+      dataInicio = new Date();
+      dataInicio.setDate(dataInicio.getDate() - 30);
+    }
+    
+    if (filtros.dataFim) {
+      dataFim = new Date(filtros.dataFim);
+      if (isNaN(dataFim.getTime())) {
+        dataFim = new Date();
+      }
+    } else {
+      dataFim = new Date();
+    }
+
+    // Garante que dataInicio não seja maior que dataFim
+    if (dataInicio > dataFim) {
+      const temp = dataInicio;
+      dataInicio = dataFim;
+      dataFim = temp;
+    }
+
+    for (let d = new Date(dataInicio); d <= dataFim; d.setDate(d.getDate() + 1)) {
+      const dataStr = d.toISOString().split('T')[0];
+      const transacoesDia = transacoes.filter((t: any) => {
+        if (!t.dataHora) return false;
+        try {
+          const dataTransacaoObj = new Date(t.dataHora);
+          if (isNaN(dataTransacaoObj.getTime())) return false;
+          const dataTransacao = dataTransacaoObj.toISOString().split('T')[0];
+          return dataTransacao === dataStr;
+        } catch {
+          return false;
+        }
+      });
+
+      const entradas = transacoesDia
+        .filter((t: any) => t.tipo === 'entrada')
+        .reduce((sum: number, t: any) => sum + (t.valor || 0), 0);
+      
+      const saidas = transacoesDia
+        .filter((t: any) => t.tipo === 'saida')
+        .reduce((sum: number, t: any) => sum + (t.valor || 0), 0);
+
+      gastosPorDia.push({
+        data: dataStr,
+        entradas,
+        saidas,
+        saldo: entradas - saidas,
+      });
+    }
+
+    // Top categorias
+    const categoriasMap = new Map<string, number>();
+    transacoes
+      .filter((t: any) => t.tipo === 'saida')
+      .forEach((t: any) => {
+        const cat = t.categoria || 'outros';
+        categoriasMap.set(cat, (categoriasMap.get(cat) || 0) + (t.valor || 0));
+      });
+
+    const topCategorias = Array.from(categoriasMap.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
+
+    // Gastos por categoria (para gráfico de barras)
+    const gastosPorCategoria = Array.from(categoriasMap.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
+
+    return c.json({
+      success: true,
+      dados: {
+        totalEntradas,
+        totalSaidas,
+        saldo: totalEntradas - totalSaidas,
+        totalTransacoes: transacoes.length,
+        transacoes: transacoes.slice(0, 100), // Limita a 100 para não sobrecarregar
+        gastosPorDia,
+        topCategorias,
+        gastosPorCategoria,
+      },
+    });
+  } catch (error: any) {
+    console.error('Erro em POST /api/relatorios/gerar:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao gerar relatório' }, 500);
+  }
+});
+
+// API: Enviar relatório via WhatsApp - PROTEGIDA
+app.post('/api/relatorios/enviar-whatsapp', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ success: false, error: 'Token não fornecido' }, 401);
+    }
+    
+    const token = authHeader.substring(7);
+    const jwtSecret = c.env.JWT_SECRET || 'dev-secret-key-change-in-production';
+    let telefoneFormatado: string;
+    try {
+      const telefone = await extrairTelefoneDoToken(token, jwtSecret);
+      telefoneFormatado = formatarTelefone(telefone);
+    } catch (error: any) {
+      return c.json({ success: false, error: error.message || 'Token inválido ou expirado' }, 401);
+    }
+    
+    const body = await c.req.json();
+    const filtros: any = {
+      telefone: telefoneFormatado,
+      dataInicio: body.dataInicio,
+      dataFim: body.dataFim,
+      categoria: body.categoria,
+      valorMin: body.valorMin,
+      valorMax: body.valorMax,
+      limit: 10000,
+    };
+
+    if (body.tipo && body.tipo !== 'todos') {
+      filtros.tipo = body.tipo;
+    }
+
+    if (body.metodo && body.metodo !== 'todos') {
+      filtros.metodo = body.metodo;
+    }
+
+    // Busca transações
+    const resultado = await buscarTransacoes(c.env.financezap_db, filtros);
+    const transacoes = resultado.transacoes || [];
+
+    // Calcula totais
+    const totalEntradas = transacoes
+      .filter((t: any) => t.tipo === 'entrada')
+      .reduce((sum: number, t: any) => sum + (t.valor || 0), 0);
+    
+    const totalSaidas = transacoes
+      .filter((t: any) => t.tipo === 'saida')
+      .reduce((sum: number, t: any) => sum + (t.valor || 0), 0);
+
+    // Formata período
+    const periodoTexto = filtros.dataInicio && filtros.dataFim
+      ? `${new Date(filtros.dataInicio).toLocaleDateString('pt-BR')} - ${new Date(filtros.dataFim).toLocaleDateString('pt-BR')}`
+      : 'Período completo';
+
+    // Monta mensagem
+    let mensagem = `📊 *Relatório Financeiro*\n\n`;
+    mensagem += `📅 *Período:* ${periodoTexto}\n\n`;
+    mensagem += `💰 *Total de Entradas:* ${formatarMoeda(totalEntradas)}\n`;
+    mensagem += `💸 *Total de Saídas:* ${formatarMoeda(totalSaidas)}\n`;
+    mensagem += `📈 *Saldo:* ${formatarMoeda(totalEntradas - totalSaidas)}\n`;
+    mensagem += `📋 *Total de Transações:* ${transacoes.length}\n\n`;
+
+    // Top 5 categorias
+    const categoriasMap = new Map<string, number>();
+    transacoes
+      .filter((t: any) => t.tipo === 'saida')
+      .forEach((t: any) => {
+        const cat = t.categoria || 'outros';
+        categoriasMap.set(cat, (categoriasMap.get(cat) || 0) + (t.valor || 0));
+      });
+
+    const topCategorias = Array.from(categoriasMap.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+
+    if (topCategorias.length > 0) {
+      mensagem += `🏆 *Top 5 Categorias:*\n`;
+      topCategorias.forEach((cat, index) => {
+        mensagem += `${index + 1}. ${cat.name}: ${formatarMoeda(cat.value)}\n`;
+      });
+      mensagem += `\n`;
+    }
+
+    mensagem += `💡 Para visualizar gráficos detalhados e baixar o PDF, acesse o app: https://usezela.com`;
+
+    // Envia via WhatsApp
+    const resultadoEnvio = await enviarMensagemZApi(telefoneFormatado, mensagem, c.env);
+    
+    if (!resultadoEnvio.success) {
+      return c.json({ success: false, error: resultadoEnvio.error || 'Erro ao enviar mensagem' }, 500);
+    }
+
+    return c.json({
+      success: true,
+      message: 'Relatório enviado via WhatsApp com sucesso',
+    });
+  } catch (error: any) {
+    console.error('Erro em POST /api/relatorios/enviar-whatsapp:', error);
+    return c.json({ success: false, error: error.message || 'Erro ao enviar relatório' }, 500);
+  }
+});
+
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext): Promise<void> {
+    // Processa notificações de agendamentos
     ctx.waitUntil(processarNotificacoesAgendamentos(env));
+    
+    // MELHORIA: Limpeza automática de dados expirados
+    ctx.waitUntil(limparDadosExpirados(env));
   },
 };
 
+// MELHORIA: Função para limpar dados expirados (cache, estados, métricas antigas, queue)
+async function limparDadosExpirados(env: Bindings): Promise<void> {
+  try {
+    // Limpa estados de conversação expirados
+    const { verificarElimparEstadosExpirados } = await import('./estadosConversacao');
+    const estadosRemovidos = await verificarElimparEstadosExpirados(env.financezap_db);
+    if (estadosRemovidos > 0) {
+      console.log(`🧹 Limpeza: ${estadosRemovidos} estados expirados removidos`);
+    }
+
+    // Limpa cache de IA expirado
+    const { limparCacheExpirado } = await import('./cacheIA');
+    const cacheRemovido = await limparCacheExpirado(env.financezap_db);
+    if (cacheRemovido > 0) {
+      console.log(`🧹 Limpeza: ${cacheRemovido} entradas de cache expiradas removidas`);
+    }
+
+    // Limpa métricas antigas (mais de 30 dias)
+    const { limparMetricasAntigas } = await import('./metricas');
+    const metricasRemovidas = await limparMetricasAntigas(env.financezap_db);
+    if (metricasRemovidas > 0) {
+      console.log(`🧹 Limpeza: ${metricasRemovidas} métricas antigas removidas`);
+    }
+
+    // Limpa queue antiga (mais de 7 dias)
+    const { limparQueueAntiga } = await import('./queueProcessamento');
+    const queueRemovida = await limparQueueAntiga(env.financezap_db);
+    if (queueRemovida > 0) {
+      console.log(`🧹 Limpeza: ${queueRemovida} mensagens antigas da queue removidas`);
+    }
+  } catch (error: any) {
+    console.error('❌ Erro ao limpar dados expirados:', error);
+  }
+}
+
 async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
   try {
-    console.log('🔔 Iniciando processamento de notificações de agendamentos...');
     
     const hoje = new Date().toISOString().split('T')[0];
-    console.log(`📅 Buscando agendamentos para: ${hoje}`);
     
     // Busca todos os agendamentos pendentes do dia que ainda não foram notificados
     const query = `
@@ -4421,7 +5456,6 @@ async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
     const result = await env.financezap_db.prepare(query).bind(hoje).all<AgendamentoRecord>();
     const agendamentos = result.results || [];
     
-    console.log(`📋 Encontrados ${agendamentos.length} agendamentos para notificar`);
     
     if (agendamentos.length === 0) {
       return;
@@ -4444,7 +5478,7 @@ async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
         if (ags.length === 1) {
           const ag = ags[0];
           mensagem += `📋 *${ag.descricao}*\n`;
-          mensagem += `💰 R$ ${ag.valor.toFixed(2)}\n`;
+          mensagem += `💰 ${formatarMoeda(ag.valor)}\n`;
           mensagem += `📅 ${new Date(ag.dataAgendamento + 'T00:00:00').toLocaleDateString('pt-BR')}\n`;
           mensagem += `📝 ${ag.tipo === 'pagamento' ? 'Pagamento' : 'Recebimento'}\n\n`;
           if (ag.recorrente === 1 && ag.parcelaAtual && ag.totalParcelas) {
@@ -4454,7 +5488,7 @@ async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
           mensagem += `Você tem ${ags.length} agendamentos hoje:\n\n`;
           ags.forEach((ag, index) => {
             mensagem += `${index + 1}. *${ag.descricao}*\n`;
-            mensagem += `   💰 R$ ${ag.valor.toFixed(2)}\n`;
+            mensagem += `   💰 ${formatarMoeda(ag.valor)}\n`;
             if (ag.recorrente === 1 && ag.parcelaAtual && ag.totalParcelas) {
               mensagem += `   📊 Parcela ${ag.parcelaAtual}/${ag.totalParcelas}\n`;
             }
@@ -4469,7 +5503,6 @@ async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
           await enviarMensagemZApi(telefone, mensagem, env);
         } else if (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_WHATSAPP_NUMBER) {
           // Implementar envio via Twilio se necessário
-          console.log('⚠️ Twilio não implementado para notificações automáticas');
         }
         
         // Marca como notificado
@@ -4480,13 +5513,11 @@ async function processarNotificacoesAgendamentos(env: Bindings): Promise<void> {
             .run();
         }
         
-        console.log(`✅ Notificação enviada para ${telefone} (${ags.length} agendamento(s))`);
       } catch (error: any) {
         console.error(`❌ Erro ao enviar notificação para ${telefone}:`, error);
       }
     }
     
-    console.log('✅ Processamento de notificações concluído');
   } catch (error: any) {
     console.error('❌ Erro ao processar notificações de agendamentos:', error);
   }

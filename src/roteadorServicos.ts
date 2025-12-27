@@ -3,6 +3,7 @@
  */
 
 import { buscarServicoPorId, validarDadosServico, gerarPromptIdentificacaoServico } from './servicos';
+import { formatarMoeda } from './formatadorMensagens';
 
 export interface DecisaoServico {
   servicoId: string;
@@ -91,13 +92,13 @@ export function gerarMensagemResposta(servicoId: string, resultado: any): string
     case 'transacao':
       return `✅ Transação registrada com sucesso!\n\n` +
              `📋 ${resultado.descricao || 'Transação'}\n` +
-             `💵 R$ ${resultado.valor?.toFixed(2) || '0,00'}\n` +
+             `💵 ${formatarMoeda(resultado.valor || 0)}\n` +
              `🏷️ ${resultado.categoria || 'outros'}\n` +
              `📊 ${resultado.tipo === 'entrada' ? 'Entrada' : 'Saída'} | ${resultado.metodo || 'não informado'}`;
     case 'agendamento':
       return `📅 Agendamento criado com sucesso!\n\n` +
              `📋 ${resultado.descricao || 'Agendamento'}\n` +
-             `💵 R$ ${resultado.valor?.toFixed(2) || '0,00'}\n` +
+             `💵 ${formatarMoeda(resultado.valor || 0)}\n` +
              `📅 Data: ${resultado.dataAgendamento || 'não informada'}\n` +
              `${resultado.recorrente ? `🔄 Recorrente: ${resultado.totalParcelas || 'indefinido'} parcelas` : '📌 Único'}`;
     case 'consulta':

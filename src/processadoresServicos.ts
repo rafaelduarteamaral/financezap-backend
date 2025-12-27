@@ -5,6 +5,8 @@
  * Se suas funções estiverem em caminhos diferentes, ajuste os imports abaixo.
  */
 
+import { formatarMoeda } from './formatadorMensagens';
+
 // Tenta importar funções reais (adapte os caminhos conforme necessário)
 let salvarTransacao: any;
 let criarAgendamento: any;
@@ -131,7 +133,7 @@ export async function processarConsulta(dados: any, telefone: string): Promise<a
       switch (dados.tipoConsulta) {
         case 'saldo':
           const saldo = await calcularSaldo(telefone);
-          mensagem = `💰 Seu saldo atual é: R$ ${saldo.toFixed(2)}`;
+          mensagem = `💰 Seu saldo atual é: ${formatarMoeda(saldo)}`;
           break;
 
         case 'resumo':
@@ -174,9 +176,9 @@ function formatarResumo(resumo: any, periodo: string): string {
   }
 
   return `📊 Resumo do ${periodo}:\n\n` +
-         `💵 Saldo: R$ ${(resumo.saldo || 0).toFixed(2)}\n` +
-         `📈 Entradas: R$ ${(resumo.entradas || 0).toFixed(2)}\n` +
-         `📉 Saídas: R$ ${(resumo.saidas || 0).toFixed(2)}`;
+         `💵 Saldo: ${formatarMoeda(resumo.saldo || 0)}\n` +
+         `📈 Entradas: ${formatarMoeda(resumo.entradas || 0)}\n` +
+         `📉 Saídas: ${formatarMoeda(resumo.saidas || 0)}`;
 }
 
 function formatarAgendamentos(agendamentos: any[]): string {
@@ -188,7 +190,7 @@ function formatarAgendamentos(agendamentos: any[]): string {
   
   agendamentos.slice(0, 5).forEach((ag, index) => {
     mensagem += `${index + 1}. 📋 ${ag.descricao || 'Agendamento'}\n`;
-    mensagem += `   💵 R$ ${(ag.valor || 0).toFixed(2)}\n`;
+    mensagem += `   💵 ${formatarMoeda(ag.valor || 0)}\n`;
     mensagem += `   📅 ${ag.dataAgendamento || 'Data não informada'}\n\n`;
   });
 

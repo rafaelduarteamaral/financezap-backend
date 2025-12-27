@@ -43,9 +43,132 @@ const zapiConfig: ZApiConfig | null = (() => {
 })();
 
 /**
+ * Divide uma mensagem longa em partes menores que o limite do WhatsApp (4096 caracteres)
+ */
+function dividirMensagem(mensagem: string, limite: number = 4000): string[] {
+  // Deixa uma margem de segurança (96 caracteres) para evitar problemas
+  if (mensagem.length <= limite) {
+    return [mensagem];
+  }
+
+  const partes: string[] = [];
+  let inicio = 0;
+
+  while (inicio < mensagem.length) {
+    let fim = inicio + limite;
+    
+    // Se não é a última parte, tenta quebrar em uma linha nova ou espaço
+    if (fim < mensagem.length) {
+      // Procura por quebra de linha próxima
+      const quebraLinha = mensagem.lastIndexOf('\n', fim);
+      // Procura por espaço próximo
+      const espaco = mensagem.lastIndexOf(' ', fim);
+      
+      // Prefere quebra de linha, depois espaço
+      if (quebraLinha > inicio + limite * 0.7) {
+        fim = quebraLinha + 1;
+      } else if (espaco > inicio + limite * 0.7) {
+        fim = espaco + 1;
+      }
+    } else {
+      fim = mensagem.length;
+    }
+    
+    partes.push(mensagem.substring(inicio, fim));
+    inicio = fim;
+  }
+
+  return partes;
+}
+
+/**
  * Envia mensagem via Z-API
+ * Se a mensagem for muito longa (>4000 caracteres), divide em múltiplas mensagens
  */
 export async function enviarMensagemZApi(
+  telefone: string,
+  mensagem: string
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  if (!zapiConfig) {
+    return {
+      success: false,
+      error: 'Z-API não configurada. Configure ZAPI_INSTANCE_ID e ZAPI_TOKEN no .env'
+    };
+  }
+
+  try {
+    // Remove prefixo whatsapp: se existir e formata o número
+    const numeroLimpo = telefone.replace('whatsapp:', '').replace('+', '');
+    
+    // Z-API espera o número no formato: 5561981474690 (sem + e sem whatsapp:)
+    const numeroFormatado = numeroLimpo.startsWith('55') 
+      ? numeroLimpo 
+      : `55${numeroLimpo}`;
+
+    // Divide mensagem longa em partes menores (evita "Ler mais" do WhatsApp)
+    const partesMensagem = dividirMensagem(mensagem);
+    
+    // Se a mensagem foi dividida, envia cada parte separadamente
+    if (partesMensagem.length > 1) {
+      console.log(`📤 Mensagem longa detectada (${mensagem.length} caracteres). Dividindo em ${partesMensagem.length} partes...`);
+      
+      let ultimoMessageId: string | undefined;
+      let primeiroErro: string | undefined;
+      
+      // Envia cada parte sequencialmente
+      for (let i = 0; i < partesMensagem.length; i++) {
+        const parte = partesMensagem[i];
+        const indicador = partesMensagem.length > 1 ? ` (${i + 1}/${partesMensagem.length})` : '';
+        
+        console.log(`📤 Enviando parte ${i + 1}/${partesMensagem.length} (${parte.length} caracteres)...`);
+        
+        const resultado = await enviarMensagemZApiUnica(telefone, parte);
+        
+        if (resultado.success) {
+          ultimoMessageId = resultado.messageId;
+        } else {
+          primeiroErro = resultado.error;
+          // Continua enviando as outras partes mesmo se uma falhar
+          console.warn(`⚠️ Erro ao enviar parte ${i + 1}: ${resultado.error}`);
+        }
+        
+        // Pequeno delay entre mensagens para evitar spam
+        if (i < partesMensagem.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+      
+      if (primeiroErro && !ultimoMessageId) {
+        // Todas as partes falharam
+        return {
+          success: false,
+          error: primeiroErro
+        };
+      }
+      
+      // Retorna sucesso se pelo menos uma parte foi enviada
+      return {
+        success: true,
+        messageId: ultimoMessageId || 'multiple'
+      };
+    }
+    
+    // Mensagem curta - envia normalmente
+    return await enviarMensagemZApiUnica(telefone, mensagem);
+  } catch (error: any) {
+    console.error('❌ Erro ao enviar mensagem via Z-API:', error);
+    console.error('   Stack:', error.stack);
+    return {
+      success: false,
+      error: error.message || 'Erro ao enviar mensagem via Z-API'
+    };
+  }
+}
+
+/**
+ * Envia uma única mensagem via Z-API (sem divisão)
+ */
+async function enviarMensagemZApiUnica(
   telefone: string,
   mensagem: string
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
@@ -73,6 +196,7 @@ export async function enviarMensagemZApi(
     console.log(`   URL: ${url}`);
     console.log(`   Telefone original: ${telefone}`);
     console.log(`   Telefone formatado: ${numeroFormatado}`);
+    console.log(`   Tamanho da mensagem: ${mensagem.length} caracteres`);
     console.log(`   Mensagem: ${mensagem.substring(0, 50)}...`);
     
     const requestBody = {
@@ -221,6 +345,109 @@ export async function verificarStatusInstancia(): Promise<{ conectada: boolean; 
     return { conectada: true };
   } catch (error: any) {
     return { conectada: false, erro: error.message };
+  }
+}
+
+/**
+ * Envia mensagem com button-list via Z-API (POST /send-button-list)
+ */
+export async function enviarMensagemComButtonListZApi(
+  telefone: string,
+  mensagem: string,
+  botoes: Array<{ id: string; label: string }>,
+  env?: any
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  const instanceId = env?.ZAPI_INSTANCE_ID || zapiConfig?.instanceId;
+  const token = env?.ZAPI_TOKEN || zapiConfig?.token;
+  const clientToken = env?.ZAPI_CLIENT_TOKEN || zapiConfig?.clientToken;
+  const baseUrl = env?.ZAPI_BASE_URL || zapiConfig?.baseUrl || 'https://api.z-api.io';
+
+  if (!instanceId || !token || !clientToken) {
+    return {
+      success: false,
+      error: 'Z-API não configurada. Configure ZAPI_INSTANCE_ID, ZAPI_TOKEN e ZAPI_CLIENT_TOKEN'
+    };
+  }
+
+  if (botoes.length === 0 || botoes.length > 3) {
+    return {
+      success: false,
+      error: 'Deve ter entre 1 e 3 botões'
+    };
+  }
+
+  try {
+    // Remove prefixo whatsapp: se existir e formata o número
+    const numeroLimpo = telefone.replace('whatsapp:', '').replace('+', '');
+    const numeroFormatado = numeroLimpo.startsWith('55') 
+      ? numeroLimpo 
+      : `55${numeroLimpo}`;
+
+    const url = `${baseUrl}/instances/${instanceId}/token/${token}/send-button-list`;
+    
+    console.log(`📤 Enviando mensagem com button-list via Z-API:`);
+    console.log(`   URL: ${url}`);
+    console.log(`   Telefone: ${numeroFormatado}`);
+    console.log(`   Botões: ${botoes.length}`);
+
+    const requestBody = {
+      phone: numeroFormatado,
+      message: mensagem,
+      buttonList: {
+        buttons: botoes.map(btn => ({
+          id: btn.id,
+          label: btn.label
+        }))
+      }
+    };
+
+    console.log(`   Request Body:`, JSON.stringify(requestBody, null, 2));
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Client-Token': clientToken,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const responseText = await response.text();
+    console.log(`📥 Resposta da Z-API (button-list):`);
+    console.log(`   Status: ${response.status} ${response.statusText}`);
+    console.log(`   Response: ${responseText}`);
+
+    let data: any;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('❌ Erro ao parsear resposta JSON:', responseText);
+      return {
+        success: false,
+        error: `Resposta inválida da Z-API: ${responseText.substring(0, 100)}`
+      };
+    }
+
+    if (!response.ok || (data && (data.error || data.message === 'NOT_FOUND'))) {
+      console.error('❌ Erro Z-API ao enviar button-list:', data);
+      return {
+        success: false,
+        error: data?.message || data?.error || `Erro ${response.status}: ${response.statusText}`
+      };
+    }
+
+    console.log(`✅ Mensagem com button-list enviada via Z-API`);
+    return {
+      success: true,
+      messageId: data?.messageId || data?.id || 'unknown'
+    };
+  } catch (error: any) {
+    console.error('❌ Erro ao enviar mensagem com button-list via Z-API:', error);
+    return {
+      success: false,
+      error: error.message || 'Erro ao enviar mensagem com button-list via Z-API'
+    };
   }
 }
 

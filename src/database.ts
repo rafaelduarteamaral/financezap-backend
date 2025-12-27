@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
+import { formatarMoeda } from './formatadorMensagens';
 
 // Inicializa o Prisma Client
 const prisma = new PrismaClient({
@@ -427,7 +428,7 @@ export async function calcularTotalPorTelefone(telefone: string): Promise<number
     console.log(`      Total de transações: ${transacoes.length}`);
     console.log(`      Entradas: ${transacoes.filter((t: any) => t.tipo === 'entrada').reduce((sum: number, t: any) => sum + t.valor, 0).toFixed(2)}`);
     console.log(`      Saídas: ${transacoes.filter((t: any) => t.tipo === 'saida').reduce((sum: number, t: any) => sum + t.valor, 0).toFixed(2)}`);
-    console.log(`      Saldo final: R$ ${saldo.toFixed(2)}`);
+    console.log(`      Saldo final: ${formatarMoeda(saldo)}`);
     
     return saldo;
   } catch (error) {
@@ -1164,7 +1165,7 @@ export async function obterEstatisticas(filtros?: {
       _sum: { valor: true },
     });
     
-    console.log(`   📊 Gasto hoje (${hoje}): R$ ${hojeSum._sum.valor || 0}`);
+    console.log(`   📊 Gasto hoje (${hoje}): ${formatarMoeda(hojeSum._sum.valor || 0)}`);
     
     // Debug: conta quantas transações de hoje existem
     const hojeCount = await prisma.transacao.count({
@@ -1210,7 +1211,7 @@ export async function obterEstatisticas(filtros?: {
       _sum: { valor: true },
     });
     
-    console.log(`   📊 Gasto do mês (desde ${mesInicioStr}): R$ ${mesSum._sum.valor || 0}`);
+    console.log(`   📊 Gasto do mês (desde ${mesInicioStr}): ${formatarMoeda(mesSum._sum.valor || 0)}`);
     
     // Debug: conta quantas transações do mês existem
     const mesCount = await prisma.transacao.count({
